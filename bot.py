@@ -40,7 +40,7 @@ bot = telebot.TeleBot(API_TOKEN)
 
 # ---------- HELPER FUNCTIONS ----------
 def can_download(user_id):
-    if user_id == ADMIN_ID:
+    if user_id == int(ADMIN_ID):
         return True
     today = date.today().isoformat()
     cursor.execute("SELECT * FROM downloads WHERE user_id=? AND download_date=?", (user_id, today))
