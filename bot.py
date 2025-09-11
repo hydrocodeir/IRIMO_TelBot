@@ -116,7 +116,7 @@ def help_command(message):
 @bot.message_handler(commands=['report'])
 def report_command(message):
     user_id = message.from_user.id
-    if user_id != ADMIN_ID:
+    if str(user_id) != str(ADMIN_ID):
         bot.reply_to(message, "⛔ You are not authorized to use this command.")
         return
 
