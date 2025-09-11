@@ -123,11 +123,10 @@ def report_command(message):
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
     
-    # گرفتن گزارش دانلودهای امروز
     c.execute("""
-        SELECT user_id, username, region_name, station_name, date(download_time)
+        SELECT user_id, username, station_name, download_date
         FROM downloads
-        WHERE date(download_time) = date('now', 'localtime')
+        WHERE download_date = date('now', 'localtime')
     """)
     rows = c.fetchall()
     conn.close()
@@ -139,9 +138,9 @@ def report_command(message):
     # ساخت متن گزارش
     report_lines = ["📊 *Daily Download Report*"]
     for r in rows:
-        uid, uname, region, station, ddate = r
+        uid, uname, station, ddate = r
         uname_display = uname if uname else "N/A"
-        report_lines.append(f"- 👤 {uname_display} (ID: {uid})\n  📍 {region} | {station} | {ddate}")
+        report_lines.append(f"- 👤 {uname_display} (ID: {uid})\n  📍{station} | {ddate}")
     
     report_text = "\n\n".join(report_lines)
     
