@@ -40,6 +40,8 @@ bot = telebot.TeleBot(API_TOKEN)
 
 # ---------- HELPER FUNCTIONS ----------
 def can_download(user_id):
+    if user_id == ADMIN_ID:
+        return True
     today = date.today().isoformat()
     cursor.execute("SELECT * FROM downloads WHERE user_id=? AND download_date=?", (user_id, today))
     return cursor.fetchone() is None
@@ -127,7 +129,7 @@ def callback_handler(call):
         return
 
     # ---------- Check download limit ----------
-    if user_id != ADMIN_ID and not can_download(user_id):
+    if not can_download(user_id):
         bot.answer_callback_query(call.id, "❌ You have already downloaded a station today.")
         return
 
