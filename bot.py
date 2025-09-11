@@ -127,7 +127,7 @@ def callback_handler(call):
         return
 
     # ---------- Check download limit ----------
-    if not can_download(user_id) and not call.data.startswith("admin_report"):
+    if user_id != ADMIN_ID and not can_download(user_id):
         bot.answer_callback_query(call.id, "❌ You have already downloaded a station today.")
         return
 
