@@ -1,10 +1,9 @@
-#!/usr/bin/env python3
 """
-Telegram bot to let users download station data (from data.parquet) as CSV.
+Telegram bot to let users download station data (from Iran_Data.parquet) as CSV.
 Requires:
  - TELEGRAM_BOT_TOKEN environment variable set to your bot token
- - data.parquet in same folder (or edit DATA_PATH)
- - guide.pdf (pre-prepared) in same folder (or edit GUIDE_PATH)
+ - Iran_Data.parquet in same folder (or edit DATA_PATH)
+ - Help.pdf (pre-prepared) in same folder (or edit GUIDE_PATH)
 """
 
 import os
@@ -13,21 +12,22 @@ import tempfile
 import logging
 from typing import List, Tuple
 
+import dotenv
 import pandas as pd
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputFile, CallbackQuery
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, CallbackQuery
 
 # ---------- Configuration ----------
+dotenv.load_dotenv()
 DATA_PATH = os.environ.get("DATA_PATH", "Iran_Data.parquet")
 GUIDE_PATH = os.environ.get("GUIDE_PATH", "Help.pdf")
-# BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-BOT_TOKEN = "8411597977:AAEpd2xSWb-uLS72r_SJfFA0xOa_7YH5n3M"
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Please set TELEGRAM_BOT_TOKEN environment variable.")
 
 # Adjust maximum buttons per row / page
 BUTTONS_PER_ROW = 2
-MAX_BUTTONS_PER_PAGE = 100
+MAX_BUTTONS_PER_PAGE = 20
 
 # ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
@@ -36,14 +36,14 @@ logger = logging.getLogger(__name__)
 # ---------- Load dataset into memory on startup ----------
 logger.info("Loading dataset from %s", DATA_PATH)
 df = pd.read_parquet(DATA_PATH)
+logger.info("Loaded dataset from %s", DATA_PATH)
 
-# make sure date column is datetime
+
 if "date" in df.columns:
     df["date"] = pd.to_datetime(df["date"])
 else:
     raise RuntimeError("Iran_Data.parquet must contain a 'date' column")
 
-# Ensure keys exist
 required_cols = {
     "station_id", "station_name", "region_id", "region_name",
     "lat", "lon", "station_elevation", "date",
@@ -52,9 +52,9 @@ missing = required_cols - set(df.columns)
 if missing:
     raise RuntimeError(f"Missing columns in Iran_Data.parquet: {missing}")
 
-# Pre-compute region and station info
+
 regions_df = df[["region_id", "region_name"]].drop_duplicates().sort_values("region_name")
-# Map region_id -> list of stations (station_id, station_name)
+
 stations_by_region = {}
 for rid, group in df.groupby("region_id"):
     stations_by_region[rid] = (
@@ -64,12 +64,13 @@ for rid, group in df.groupby("region_id"):
         .to_dict(orient="records")
     )
 
-# Create quick lookups
 region_name_by_id = dict(regions_df[["region_id", "region_name"]].values)
 station_name_by_id = dict(df[["station_id", "station_name"]].drop_duplicates().values)
 
+
 # ---------- Telebot setup ----------
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)  # plain text
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
+
 
 # Helper: chunk list into pages
 def paginate(items: List[Tuple[str, str]], page: int, page_size: int) -> Tuple[List[Tuple[str,str]], int]:
@@ -125,7 +126,7 @@ def send_welcome(message):
     text = (
         "سلام 👋\n"
         "به بات دانلود داده‌های هواشناسی خوش آمدید.\n\n"
-        "لطفاً یک منطقه (region) را انتخاب کنید:"
+        "لطفاً یک استان را انتخاب کنید:"
     )
     # build list of (callback_data, label)
     pairs = []
@@ -161,8 +162,8 @@ def on_callback(call: CallbackQuery):
             new_page = 0
         # Parse the original message text to determine what set to repopulate
         orig = call.message.text or ""
-        # If text contains "لطفاً یک منطقه" -> paginate regions
-        if "لطفاً یک منطقه" in orig:
+        # If text contains "لطفاً یک استان" -> paginate regions
+        if "لطفاً یک استان" in orig:
             # rebuild region pairs
             pairs = [(f"region|{rid}", str(rname)) for rid,rname in regions_df[["region_id","region_name"]].values]
             markup = build_inline_keyboard(pairs, page=new_page, back_button=None)
@@ -180,7 +181,7 @@ def on_callback(call: CallbackQuery):
             rid = rid_token
             station_records = stations_by_region.get(rid, [])
             pairs = [(f"station|{r['station_id']}", r['station_name']) for r in station_records]
-            markup = build_inline_keyboard(pairs, page=new_page, back_button=f"back|regions")
+            markup = build_inline_keyboard(pairs, page=new_page, back_button=("back|regions", "⬅️ Back"))
             bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=markup)
             bot.answer_callback_query(call.id)
             return
@@ -191,7 +192,7 @@ def on_callback(call: CallbackQuery):
     # Back navigation
     if data == "back|regions":
         text = (
-            "لطفاً یک منطقه (region) را انتخاب کنید:"
+            "لطفاً یک استان را انتخاب کنید:"
         )
         pairs = [(f"region|{rid}", str(rname)) for rid,rname in regions_df[["region_id","region_name"]].values]
         markup = build_inline_keyboard(pairs, page=0)
@@ -206,16 +207,16 @@ def on_callback(call: CallbackQuery):
         # build station list
         station_records = stations_by_region.get(region_id, [])
         if not station_records:
-            bot.answer_callback_query(call.id, f"هیچ ایستگاهی برای منطقه «{region_name}» وجود ندارد.")
+            bot.answer_callback_query(call.id, f"هیچ ایستگاهی برای استان «{region_name}» وجود ندارد.")
             return
         pairs = [(f"station|{rec['station_id']}", rec['station_name']) for rec in station_records]
         # We'll include a small invisible marker line to help pagination handler determine region context
         text = (
-            f"منطقه منتخب: {region_name}\n\n"
-            "لطفاً یک ایستگاه (station) را انتخاب کنید:\n\n"
+            f"استان منتخب: {region_name}\n\n"
+            "لطفاً یک ایستگاه را انتخاب کنید:\n\n"
             f"REGION_ID:{region_id}"  # token used by pagination logic above
         )
-        markup = build_inline_keyboard(pairs, page=0, back_button=("back|regions", "« بازگشت به مناطق"))
+        markup = build_inline_keyboard(pairs, page=0, back_button=("back|regions", "« بازگشت به استان‌ها"))
         bot.edit_message_text(chat_id=chat_id, text=text, message_id=message_id, reply_markup=markup)
         bot.answer_callback_query(call.id)
         return
@@ -259,19 +260,20 @@ def on_callback(call: CallbackQuery):
 
         # فیلتر داده‌ها برای ایستگاه انتخاب‌شده
         sdf = df[df["station_id"] == station_id].sort_values("date")
+        region_name = sdf["region_name"].iloc[0] if not sdf.empty else "UnknownRegion"
         if sdf.empty:
             bot.send_message(chat_id, "خطا: هیچ داده‌ای برای این ایستگاه موجود نیست.")
             return
 
         # ساخت مسیر فایل موقت
-        out_name = f"{sname}_{station_id}.csv"
+        out_name = f"{region_name}_{sname}_{station_id}.csv"
         out_path = os.path.join(tempfile.gettempdir(), out_name)
 
         # ذخیره CSV
         sdf.to_csv(out_path, index=False)
 
         # فشرده‌سازی به ZIP
-        zip_name = f"{sname}_{station_id}.zip"
+        zip_name = f"{region_name}_{sname}_{station_id}.zip"
         zip_path = os.path.join(tempfile.gettempdir(), zip_name)
         import zipfile
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -286,9 +288,9 @@ def on_callback(call: CallbackQuery):
             # ارسال PDF راهنما (اگر وجود داشت)
             if os.path.exists(GUIDE_PATH):
                 with open(GUIDE_PATH, "rb") as pdf_f:
-                    bot.send_document(chat_id, pdf_f, caption="راهنمای استفاده", timeout=120)
+                    bot.send_document(chat_id, pdf_f, caption="راهنمای پارامترها و واحدها", timeout=120)
             else:
-                bot.send_message(chat_id, "راهنمای PDF پیدا نشد؛ لطفاً guide.pdf را در سرور قرار دهید.")
+                bot.send_message(chat_id, "راهنمای PDF پیدا نشد؛ لطفاً Help.pdf را در سرور قرار دهید.")
 
         except Exception as e:
             logger.exception("Error while sending files: %s", e)

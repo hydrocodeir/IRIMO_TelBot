@@ -8,4 +8,5 @@ dependencies = [
     "pandas>=2.3.2",
     "pyarrow>=21.0.0",
     "pytelegrambotapi>=4.29.1",
+    "python-dotenv>=1.1.1",
 ]
