@@ -6,6 +6,9 @@ import sqlite3
 from datetime import datetime, date
 import threading
 import math
+import io
+import csv
+
 
 # ---------- CONFIG ----------
 import dotenv
@@ -94,6 +97,98 @@ def start(message):
     if user_id == ADMIN_ID:
         markup.add(InlineKeyboardButton("📊 Admin Report", callback_data="admin_report"))
     bot.send_message(message.chat.id, f"👋 Welcome {username}!\nPlease select a province:", reply_markup=markup)
+
+
+@bot.message_handler(commands=['help'])
+def help_command(message):
+    bot.send_message(
+        message.chat.id,
+        "ℹ️ *Help & Usage Guide*\n\n"
+        "1️⃣ Use /start to begin.\n"
+        "2️⃣ Select a province, then choose a synoptic station.\n"
+        "3️⃣ Download the available data (CSV + PDF).\n\n"
+        "⚠️ Limit: One station per day per user.\n"
+        "📌 This bot is for academic and research purposes only.",
+        parse_mode="Markdown"
+    )
+
+
+@bot.message_handler(commands=['report'])
+def report_command(message):
+    user_id = message.from_user.id
+    if user_id != ADMIN_ID:
+        bot.reply_to(message, "⛔ You are not authorized to use this command.")
+        return
+
+    args = message.text.split()
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+
+    # حالت پیش‌فرض: امروز
+    if len(args) == 1:
+        c.execute("""
+            SELECT user_id, username, region_name, station_name, download_time
+            FROM downloads
+            WHERE date(download_time) = date('now', 'localtime')
+        """)
+        rows = c.fetchall()
+        report_title = "📊 *Daily Download Report* (Today)"
+        filename = f"daily_report_{datetime.now().strftime('%Y-%m-%d')}.csv"
+
+    # حالت بازه تاریخی
+    elif len(args) == 3:
+        start_date, end_date = args[1], args[2]
+        try:
+            datetime.strptime(start_date, "%Y-%m-%d")
+            datetime.strptime(end_date, "%Y-%m-%d")
+        except ValueError:
+            bot.send_message(message.chat.id, "⚠️ Use: `/report YYYY-MM-DD YYYY-MM-DD`", parse_mode="Markdown")
+            conn.close()
+            return
+
+        c.execute("""
+            SELECT user_id, username, region_name, station_name, download_time
+            FROM downloads
+            WHERE date(download_time) BETWEEN ? AND ?
+        """, (start_date, end_date))
+        rows = c.fetchall()
+        report_title = f"📊 *Download Report*\nRange: {start_date} → {end_date}"
+        filename = f"report_{start_date}_to_{end_date}.csv"
+
+    else:
+        bot.send_message(message.chat.id, "⚠️ Usage:\n`/report`\n`/report YYYY-MM-DD YYYY-MM-DD`", parse_mode="Markdown")
+        conn.close()
+        return
+
+    conn.close()
+
+    if not rows:
+        bot.send_message(message.chat.id, "📭 No downloads found in this period.")
+        return
+
+    # متن گزارش
+    report_lines = [report_title]
+    for r in rows:
+        uid, uname, region, station, dtime = r
+        uname_display = uname if uname else "N/A"
+        report_lines.append(f"- 👤 {uname_display} (ID: {uid})\n  📍 {region} | {station} | 🕒 {dtime}")
+
+    report_text = "\n\n".join(report_lines)
+    bot.send_message(message.chat.id, report_text, parse_mode="Markdown")
+
+    # فایل CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["User ID", "Username", "Region", "Station", "Download Time"])
+    for row in rows:
+        writer.writerow(row)
+
+    output.seek(0)
+    csv_file = io.BytesIO(output.getvalue().encode("utf-8"))
+    bot.send_document(message.chat.id, csv_file, visible_file_name=filename, caption="📂 Download report")
+
+
+
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
