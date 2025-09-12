@@ -94,7 +94,7 @@ def start(message):
     username = message.from_user.username or message.from_user.first_name
     regions = sorted(df['region_name'].unique())
     markup = build_keyboard(regions, "region")
-    if user_id == ADMIN_ID:
+    if str(user_id) == str(ADMIN_ID):
         markup.add(InlineKeyboardButton("📊 Admin Report", callback_data="admin_report"))
     bot.send_message(message.chat.id, f"👋 Welcome {username}!\nPlease select a province:", reply_markup=markup)
 
@@ -171,7 +171,7 @@ def callback_handler(call):
         if prefix.startswith("region"):
             regions = sorted(df['region_name'].unique())
             markup = build_keyboard(regions, "region", page)
-            if user_id == ADMIN_ID:
+            if str(user_id) == str(ADMIN_ID):
                 markup.add(InlineKeyboardButton("📊 Admin Report", callback_data="admin_report"))
             bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
         elif prefix.startswith("station"):
@@ -192,7 +192,7 @@ def callback_handler(call):
     if call.data == "back_to_provinces":
         regions = sorted(df['region_name'].unique())
         markup = build_keyboard(regions, "region")
-        if user_id == ADMIN_ID:
+        if str(user_id) == str(ADMIN_ID):
             markup.add(InlineKeyboardButton("📊 Admin Report", callback_data="admin_report"))
         bot.edit_message_text("🔙 Back to province selection:", call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
@@ -233,7 +233,7 @@ def callback_handler(call):
         # بازگشت به منوی انتخاب استان با دکمه برگشت
         regions = sorted(df['region_name'].unique())
         markup = build_keyboard(regions, "region")
-        if user_id == ADMIN_ID:
+        if str(user_id) == str(ADMIN_ID):
             markup.add(InlineKeyboardButton("📊 Admin Report", callback_data="admin_report"))
         markup.add(InlineKeyboardButton("🔙 Back to Provinces", callback_data="back_to_provinces"))
         bot.send_message(call.message.chat.id, "Please select a province again:", reply_markup=markup)
