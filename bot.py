@@ -203,7 +203,8 @@ def callback_handler(call):
     # ---------- Region selection ----------
     if call.data.startswith("region|"):
         region = call.data.split("|")[1]
-        stations = sorted(df[df['region_name'] == region]['station_name'].unique())
+        # stations = sorted(df[df['region_name'] == region]['station_name'].unique())
+        stations = sorted(df.filter(df["region_name"] == region)['station_name'].unique())
         markup = build_keyboard(stations, f"station|{region}")
         # اضافه کردن دکمه برگشت به استان‌ها
         markup.add(InlineKeyboardButton("🔙 Back to Provinces", callback_data="back_to_provinces"))
