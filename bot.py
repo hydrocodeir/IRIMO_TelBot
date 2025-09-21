@@ -225,7 +225,7 @@ def callback_handler(call):
         # data.sort_values(by='date', inplace=True)
         data = data.sort(by='date')
         # data.to_csv(csv_filename, index=False)
-        data.write_csv(csv_filename, index=False)
+        data.write_csv(csv_filename)
         
         # ارسال فایل CSV و PDF
         bot.send_message(call.message.chat.id, f"🌡 Selected station: {station}\nData available from {min_date} to {max_date}")
