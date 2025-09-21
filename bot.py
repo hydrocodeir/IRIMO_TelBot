@@ -222,7 +222,8 @@ def callback_handler(call):
         csv_filename = f"{region}_{station}_{min_date}_{max_date}.csv"
         # data = df[df['station_name'] == station]
         data = df.filter(df["station_name"] == station)
-        data.sort_values(by='date', inplace=True)
+        # data.sort_values(by='date', inplace=True)
+        data = data.sort(by='date')
         data.to_csv(csv_filename, index=False)
         
         # ارسال فایل CSV و PDF
