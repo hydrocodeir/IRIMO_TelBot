@@ -179,7 +179,8 @@ def callback_handler(call):
             bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
         elif prefix.startswith("station"):
             region = prefix.split("|")[1]
-            stations = sorted(df[df['region_name'] == region]['station_name'].unique())
+            # stations = sorted(df[df['region_name'] == region]['station_name'].unique())
+            stations = sorted(df.filter(df["region_name"] == region)['station_name'].unique())
             markup = build_keyboard(stations, f"station|{region}", page)
             # اضافه کردن دکمه برگشت به استان‌ها
             markup.add(InlineKeyboardButton("🔙 Back to Provinces", callback_data="back_to_provinces"))
