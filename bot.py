@@ -2,6 +2,7 @@ import os
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import pandas as pd
+import polars as pl
 import sqlite3
 from datetime import datetime, date
 import threading
@@ -36,7 +37,9 @@ CREATE TABLE IF NOT EXISTS downloads (
 conn.commit()
 
 # ---------- LOAD DATA ----------
-df = pd.read_parquet(PARQUET_FILE)
+# df = pd.read_parquet(PARQUET_FILE)
+df = pl.read_parquet(PARQUET_FILE)
+
 
 # ---------- TELEGRAM BOT ----------
 bot = telebot.TeleBot(API_TOKEN)
