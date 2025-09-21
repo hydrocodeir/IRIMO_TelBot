@@ -58,7 +58,7 @@ def log_download(user_id, username, station_name):
     conn.commit()
 
 def get_date_range(station_name):
-    data = df[df['station_name'] == station_name]
+    data = df.filter(df["station_name"] == station_name)
     min_date = pd.to_datetime(data['date'].min()).strftime("%Y-%m-%d")
     max_date = pd.to_datetime(data['date'].max()).strftime("%Y-%m-%d")
     return min_date, max_date
@@ -220,7 +220,8 @@ def callback_handler(call):
         
         # ایجاد فایل CSV با نام Province_Station_YYYY-MM-DD.csv
         csv_filename = f"{region}_{station}_{min_date}_{max_date}.csv"
-        data = df[df['station_name'] == station]
+        # data = df[df['station_name'] == station]
+        data = df.filter(df["station_name"] == station)
         data.sort_values(by='date', inplace=True)
         data.to_csv(csv_filename, index=False)
         
