@@ -266,7 +266,7 @@ def callback_handler(call):
         station_df = df.filter(
             (pl.col("station_name") == station) &
             (pl.col("region_name") == region)
-        ).sort("date").collect(streaming=True)
+        ).sort("date").collect(engine="streaming")
         csv_filename = f"{region}_{station}_{min_date}_{max_date}.csv"
         station_df.write_csv(csv_filename)
         # data = df.filter(df["station_name"] == station)
