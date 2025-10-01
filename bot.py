@@ -247,12 +247,26 @@ def callback_handler(call):
         bot.send_message(call.message.chat.id, "Please select a province again:", reply_markup=markup)
 
 # ---------- MAIN ----------
+# def run_bot():
+#     bot.infinity_polling()
+    
+
 def run_bot():
-    bot.infinity_polling()
+    while True:
+        try:
+            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+        except Exception as e:
+            print(f"[Bot Error] {e}. Restarting in 5s...")
+            time.sleep(5)
+
+
+# if __name__ == "__main__":
+#     bot_thread = threading.Thread(target=run_bot)
+#     bot_thread.start()
 
 if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_bot)
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
-
-
+    while True:
+        time.sleep(1)
 
