@@ -41,6 +41,21 @@ conn.commit()
 # df = pl.read_parquet(PARQUET_FILE)
 df = pl.scan_parquet(PARQUET_FILE)
 
+def load_regions():
+    # returns a python list of region names (sorted)
+    regions_df = df.select(pl.col("region_name")).unique().collect()
+    return sorted(regions_df["region_name"].to_list())
+
+def load_stations_for(region):
+    # returns python list of station names for given region
+    st_df = df.filter(pl.col("region_name") == region).select(pl.col("station_name")).unique().collect()
+    return sorted(st_df["station_name"].to_list())
+
+try:
+    REGIONS = load_regions()
+except Exception as e:
+    print("Error loading regions:", e)
+    REGIONS = []
 
 
 # ---------- TELEGRAM BOT ----------
@@ -60,10 +75,20 @@ def log_download(user_id, username, station_name):
     conn.commit()
 
 def get_date_range(station_name):
-    data = df.filter(df["station_name"] == station_name)
-    min_date = pd.to_datetime(data['date'].min()).strftime("%Y-%m-%d")
-    max_date = pd.to_datetime(data['date'].max()).strftime("%Y-%m-%d")
-    return min_date, max_date
+    # data = df.filter(df["station_name"] == station_name)
+    # min_date = pd.to_datetime(data['date'].min()).strftime("%Y-%m-%d")
+    # max_date = pd.to_datetime(data['date'].max()).strftime("%Y-%m-%d")
+    # return min_date, max_date
+    # aggregate min & max date on the lazyframe (efficient)
+    agg = df.filter(pl.col("station_name") == station_name).select([
+        pl.col("date").min().alias("min_date"),
+        pl.col("date").max().alias("max_date")
+    ]).collect()
+    if agg.height == 0:
+        return None, None
+    min_d = agg["min_date"][0]
+    max_d = agg["max_date"][0]
+    return str(min_d), str(max_d)
 
 def build_keyboard(options, callback_prefix, page=0):
     """ساخت کیبورد چندستونه با پیمایش"""
@@ -97,8 +122,8 @@ def build_keyboard(options, callback_prefix, page=0):
 def start(message):
     user_id = message.from_user.id
     username = message.from_user.username or message.from_user.first_name
-    regions = sorted(df['region_name'].unique())
-    markup = build_keyboard(regions, "region")
+    # regions = sorted(df['region_name'].unique())
+    markup = build_keyboard(REGIONS, "region")
     if str(user_id) == str(ADMIN_ID):
         markup.add(InlineKeyboardButton("📊 Admin Report", callback_data="admin_report"))
     bot.send_message(message.chat.id, f"👋 Welcome {username}!\nPlease select a province:", reply_markup=markup)
@@ -174,19 +199,27 @@ def callback_handler(call):
         prefix, page = call.data.split("_page|")
         page = int(page)
         if prefix.startswith("region"):
-            regions = sorted(df['region_name'].unique())
-            markup = build_keyboard(regions, "region", page)
+            # regions = sorted(df['region_name'].unique())
+            markup = build_keyboard(REGIONS, "region", page)
             if str(user_id) == str(ADMIN_ID):
                 markup.add(InlineKeyboardButton("📊 Admin Report", callback_data="admin_report"))
             bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
         elif prefix.startswith("station"):
-            region = prefix.split("|")[1]
-            # stations = sorted(df[df['region_name'] == region]['station_name'].unique())
-            stations = sorted(df.filter(df["region_name"] == region)['station_name'].unique())
-            markup = build_keyboard(stations, f"station|{region}", page)
-            # اضافه کردن دکمه برگشت به استان‌ها
-            markup.add(InlineKeyboardButton("🔙 Back to Provinces", callback_data="back_to_provinces"))
-            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
+        #     region = prefix.split("|")[1]
+        #     # stations = sorted(df[df['region_name'] == region]['station_name'].unique())
+        #     stations = sorted(df.filter(df["region_name"] == region)['station_name'].unique())
+        #     markup = build_keyboard(stations, f"station|{region}", page)
+        #     # اضافه کردن دکمه برگشت به استان‌ها
+        #     markup.add(InlineKeyboardButton("🔙 Back to Provinces", callback_data="back_to_provinces"))
+        #     bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
+        # return
+            parts = prefix.split("|", 1)
+            if len(parts) == 2:
+                region = parts[1]
+                stations = load_stations_for(region)
+                markup = build_keyboard(stations, f"station|{region}", page)
+                markup.add(InlineKeyboardButton("🔙 Back to Provinces", callback_data="back_to_provinces"))
+                bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
         return
 
     # ---------- Check download limit ----------
@@ -196,8 +229,8 @@ def callback_handler(call):
 
     # ---------- Back button ----------
     if call.data == "back_to_provinces":
-        regions = sorted(df['region_name'].unique())
-        markup = build_keyboard(regions, "region")
+        # regions = sorted(df['region_name'].unique())
+        markup = build_keyboard(REGIONS, "region")
         if str(user_id) == str(ADMIN_ID):
             markup.add(InlineKeyboardButton("📊 Admin Report", callback_data="admin_report"))
         bot.edit_message_text("🔙 Back to province selection:", call.message.chat.id, call.message.message_id, reply_markup=markup)
@@ -207,7 +240,8 @@ def callback_handler(call):
     if call.data.startswith("region|"):
         region = call.data.split("|")[1]
         # stations = sorted(df[df['region_name'] == region]['station_name'].unique())
-        stations = sorted(df.filter(df["region_name"] == region)['station_name'].unique())
+        # stations = sorted(df.filter(df["region_name"] == region)['station_name'].unique())
+        stations = load_stations_for(region)
         markup = build_keyboard(stations, f"station|{region}")
         # اضافه کردن دکمه برگشت به استان‌ها
         markup.add(InlineKeyboardButton("🔙 Back to Provinces", callback_data="back_to_provinces"))
@@ -220,39 +254,44 @@ def callback_handler(call):
         station = parts[-1]
         min_date, max_date = get_date_range(station)
         
+        if min_date is None:
+            bot.send_message(call.message.chat.id, "No data available for this station.")
+            return
         # ایجاد فایل CSV با نام Province_Station_YYYY-MM-DD.csv
         # csv_filename = f"{region}_{station}_{min_date}_{max_date}.csv"
         # data = df[df['station_name'] == station]
-        station_data = (
-            df.filter(pl.col("station_name") == station)
-              .sort("date")
-              .collect(streaming=True)
-        )
+        station_df = df.filter(pl.col("station_name") == station).sort("date").collect(streaming=True)
+        csv_filename = f"{region}_{station}_{min_date}_{max_date}.csv"
+        station_df.write_csv(csv_filename)
         # data = df.filter(df["station_name"] == station)
         # data.sort_values(by='date', inplace=True)
         # data = data.sort(by='date')
         # data.to_csv(csv_filename, index=False)
-        buffer = io.StringIO()
-        station_data.write_csv(buffer)
-        buffer.seek(0)
+        # buffer = io.StringIO()
+        # station_data.write_csv(buffer)
+        # buffer.seek(0)
         
         # data.write_csv(csv_filename)
         
         # ارسال فایل CSV و PDF
         bot.send_message(call.message.chat.id, f"🌡 Selected station: {station}\nData available from {min_date} to {max_date}")
         # bot.send_document(call.message.chat.id, open(csv_filename, 'rb'))
-        bot.send_document(call.message.chat.id, ("data.csv", buffer.getvalue().encode("utf-8")))
-        bot.send_document(call.message.chat.id, open(PDF_GUIDE_FILE, 'rb'))
+        # bot.send_document(call.message.chat.id, ("data.csv", buffer.getvalue().encode("utf-8")))
+        # bot.send_document(call.message.chat.id, open(PDF_GUIDE_FILE, 'rb'))
+        with open(csv_filename, "rb") as f:
+            bot.send_document(call.message.chat.id, f)
+        with open(PDF_GUIDE_FILE, "rb") as f2:
+            bot.send_document(call.message.chat.id, f2)
         
         # حذف فایل CSV پس از ارسال
-        # os.remove(csv_filename)
+        os.remove(csv_filename)
         
         # ثبت دانلود در دیتابیس
         log_download(user_id, username, station)
         
         # بازگشت به منوی انتخاب استان با دکمه برگشت
-        regions = sorted(df['region_name'].unique())
-        markup = build_keyboard(regions, "region")
+        # regions = sorted(df['region_name'].unique())
+        markup = build_keyboard(REGIONS, "region")
         if str(user_id) == str(ADMIN_ID):
             markup.add(InlineKeyboardButton("📊 Admin Report", callback_data="admin_report"))
         markup.add(InlineKeyboardButton("🔙 Back to Provinces", callback_data="back_to_provinces"))
