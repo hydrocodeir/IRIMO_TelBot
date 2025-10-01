@@ -166,6 +166,7 @@ def report_command(message):
     rows = c.fetchall()
     conn.close()
     print(4)
+    print(rows)
     
     if not rows:
         bot.send_message(message.chat.id, "📭 No downloads recorded today.")
@@ -174,6 +175,7 @@ def report_command(message):
     # ساخت متن گزارش
     report_lines = ["📊 *Daily Download Report*"]
     for r in rows:
+        print(r)
         uid, uname, station, ddate = r
         uname_display = uname if uname else "N/A"
         report_lines.append(f"- 👤 {uname_display} (ID: {uid})\n  📍{station} | {ddate}")
