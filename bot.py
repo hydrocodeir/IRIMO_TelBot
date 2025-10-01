@@ -152,21 +152,16 @@ def report_command(message):
     if str(user_id) != str(ADMIN_ID):
         bot.reply_to(message, "⛔ You are not authorized to use this command.")
         return
-    print(1)
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
-    print(2)
     
     c.execute("""
         SELECT user_id, username, station_name, download_date
         FROM downloads
         WHERE download_date = date('now', 'localtime')
     """)
-    print(3)
     rows = c.fetchall()
     conn.close()
-    print(4)
-    print(rows)
     
     if not rows:
         bot.send_message(message.chat.id, "📭 No downloads recorded today.")
@@ -175,12 +170,12 @@ def report_command(message):
     # ساخت متن گزارش
     report_lines = ["📊 *Daily Download Report*"]
     for r in rows:
-        print(r)
         uid, uname, station, ddate = r
         uname_display = uname if uname else "N/A"
         report_lines.append(f"- 👤 {uname_display} (ID: {uid})\n  📍{station} | {ddate}")
     
     report_text = "\n\n".join(report_lines)
+    print(report_text)
     
     bot.send_message(message.chat.id, report_text, parse_mode="Markdown")
 
