@@ -260,13 +260,13 @@ def run_bot():
             time.sleep(5)
 
 
-# if __name__ == "__main__":
-#     bot_thread = threading.Thread(target=run_bot)
-#     bot_thread.start()
-
 if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread = threading.Thread(target=run_bot)
     bot_thread.start()
-    while True:
-        time.sleep(1)
+
+# if __name__ == "__main__":
+#     bot_thread = threading.Thread(target=run_bot, daemon=True)
+#     bot_thread.start()
+#     while True:
+#         time.sleep(1)
 
