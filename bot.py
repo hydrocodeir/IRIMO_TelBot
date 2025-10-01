@@ -177,7 +177,7 @@ def report_command(message):
     report_text = "\n\n".join(report_lines)
     print(report_text)
     
-    bot.send_message(message.chat.id, report_text, parse_mode="Markdown")
+    bot.send_message(message.chat.id, report_text, parse_mode="HTML")
 
 
 
