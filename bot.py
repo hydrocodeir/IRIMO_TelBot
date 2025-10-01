@@ -152,17 +152,20 @@ def report_command(message):
     if str(user_id) != str(ADMIN_ID):
         bot.reply_to(message, "⛔ You are not authorized to use this command.")
         return
-    
+    print(1)
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
+    print(2)
     
     c.execute("""
         SELECT user_id, username, station_name, download_date
         FROM downloads
         WHERE download_date = date('now', 'localtime')
     """)
+    print(3)
     rows = c.fetchall()
     conn.close()
+    print(4)
     
     if not rows:
         bot.send_message(message.chat.id, "📭 No downloads recorded today.")
