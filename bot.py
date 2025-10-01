@@ -74,13 +74,16 @@ def log_download(user_id, username, station_name):
     cursor.execute("INSERT INTO downloads VALUES (?, ?, ?, ?)", (user_id, username, station_name, today))
     conn.commit()
 
-def get_date_range(station_name):
+def get_date_range(region_name, station_name):
     # data = df.filter(df["station_name"] == station_name)
     # min_date = pd.to_datetime(data['date'].min()).strftime("%Y-%m-%d")
     # max_date = pd.to_datetime(data['date'].max()).strftime("%Y-%m-%d")
     # return min_date, max_date
     # aggregate min & max date on the lazyframe (efficient)
-    agg = df.filter(pl.col("station_name") == station_name).select([
+    agg = df.filter(
+        (pl.col("station_name") == station_name) &
+        (pl.col("region_name") == region_name)
+    ).select([
         pl.col("date").min().alias("min_date"),
         pl.col("date").max().alias("max_date")
     ]).collect()
@@ -252,7 +255,7 @@ def callback_handler(call):
         parts = call.data.split("|")
         region = parts[1]
         station = parts[-1]
-        min_date, max_date = get_date_range(station)
+        min_date, max_date = get_date_range(region, station)
         
         if min_date is None:
             bot.send_message(call.message.chat.id, "No data available for this station.")
@@ -260,7 +263,10 @@ def callback_handler(call):
         # ایجاد فایل CSV با نام Province_Station_YYYY-MM-DD.csv
         # csv_filename = f"{region}_{station}_{min_date}_{max_date}.csv"
         # data = df[df['station_name'] == station]
-        station_df = df.filter(pl.col("station_name") == station).sort("date").collect(streaming=True)
+        station_df = df.filter(
+            (pl.col("station_name") == station) &
+            (pl.col("region_name") == region)
+        ).sort("date").collect(streaming=True)
         csv_filename = f"{region}_{station}_{min_date}_{max_date}.csv"
         station_df.write_csv(csv_filename)
         # data = df.filter(df["station_name"] == station)
