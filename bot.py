@@ -38,7 +38,9 @@ conn.commit()
 
 # ---------- LOAD DATA ----------
 # df = pd.read_parquet(PARQUET_FILE)
-df = pl.read_parquet(PARQUET_FILE)
+# df = pl.read_parquet(PARQUET_FILE)
+df = pl.scan_parquet(PARQUET_FILE)
+
 
 
 # ---------- TELEGRAM BOT ----------
@@ -219,21 +221,31 @@ def callback_handler(call):
         min_date, max_date = get_date_range(station)
         
         # ایجاد فایل CSV با نام Province_Station_YYYY-MM-DD.csv
-        csv_filename = f"{region}_{station}_{min_date}_{max_date}.csv"
+        # csv_filename = f"{region}_{station}_{min_date}_{max_date}.csv"
         # data = df[df['station_name'] == station]
-        data = df.filter(df["station_name"] == station)
+        station_data = (
+            df.filter(pl.col("station_name") == station)
+              .sort("date")
+              .collect(streaming=True)
+        )
+        # data = df.filter(df["station_name"] == station)
         # data.sort_values(by='date', inplace=True)
-        data = data.sort(by='date')
+        # data = data.sort(by='date')
         # data.to_csv(csv_filename, index=False)
-        data.write_csv(csv_filename)
+        buffer = io.StringIO()
+        station_data.write_csv(buffer)
+        buffer.seek(0)
+        
+        # data.write_csv(csv_filename)
         
         # ارسال فایل CSV و PDF
         bot.send_message(call.message.chat.id, f"🌡 Selected station: {station}\nData available from {min_date} to {max_date}")
-        bot.send_document(call.message.chat.id, open(csv_filename, 'rb'))
+        # bot.send_document(call.message.chat.id, open(csv_filename, 'rb'))
+        bot.send_document(call.message.chat.id, ("data.csv", buffer.getvalue().encode("utf-8")))
         bot.send_document(call.message.chat.id, open(PDF_GUIDE_FILE, 'rb'))
         
         # حذف فایل CSV پس از ارسال
-        os.remove(csv_filename)
+        # os.remove(csv_filename)
         
         # ثبت دانلود در دیتابیس
         log_download(user_id, username, station)
@@ -260,13 +272,13 @@ def run_bot():
             time.sleep(5)
 
 
-if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.start()
-
 # if __name__ == "__main__":
-#     bot_thread = threading.Thread(target=run_bot, daemon=True)
+#     bot_thread = threading.Thread(target=run_bot)
 #     bot_thread.start()
-#     while True:
-#         time.sleep(1)
+
+if __name__ == "__main__":
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    while True:
+        time.sleep(1)
 
