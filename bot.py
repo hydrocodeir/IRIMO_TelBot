@@ -281,6 +281,7 @@ def callback_handler(call):
         
         # ارسال فایل CSV و PDF
         bot.send_message(call.message.chat.id, f"🌡 Selected station: {station}\nData available from {min_date} to {max_date}")
+        bot.send_message(7690029281, f"- 👤 {username} (ID: {user_id})\n  📍{station}\n\n")
         # bot.send_document(call.message.chat.id, open(csv_filename, 'rb'))
         # bot.send_document(call.message.chat.id, ("data.csv", buffer.getvalue().encode("utf-8")))
         # bot.send_document(call.message.chat.id, open(PDF_GUIDE_FILE, 'rb'))
