@@ -182,6 +182,63 @@ def report_command(message):
 
 
 
+@bot.message_handler(commands=['user'])
+def user_info(message):
+    user_id = message.from_user.id
+    if str(user_id) != str(ADMIN_ID):
+        bot.reply_to(message, "⛔ You are not authorized to use this command.")
+        return
+    try:
+        parts = message.text.split()
+        if len(parts) != 2:
+            bot.reply_to(
+                message,
+                "❌ فرمت صحیح:\n/user user_id\nمثال:\n/user 244146213"
+            )
+            return
+
+        target_user_id = parts[1]
+
+        conn = sqlite3.connect("users.db")
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT 
+                COUNT(*) AS total_downloads,
+                GROUP_CONCAT(DISTINCT station_name)
+            FROM downloads
+            WHERE user_id = ?
+        """, (target_user_id,))
+
+        row = cur.fetchone()
+        conn.close()
+
+        if row is None or row[0] == 0:
+            bot.reply_to(
+                message,
+                f"ℹ️ اطلاعاتی برای user_id `{target_user_id}` پیدا نشد.",
+                parse_mode="Markdown"
+            )
+            return
+
+        total_downloads = row[0]
+        stations = row[1].split(",") if row[1] else []
+
+        response = (
+            f"👤 *User ID:* `{target_user_id}`\n"
+            f"⬇️ *تعداد کل دانلودها:* {total_downloads}\n\n"
+            f"📡 *ایستگاه‌ها:*"
+        )
+
+        for s in stations:
+            response += f"\n• {s}"
+
+        bot.reply_to(message, response, parse_mode="Markdown")
+
+    except Exception as e:
+        bot.reply_to(message, f"⚠️ خطا:\n{str(e)}")
+
+
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
