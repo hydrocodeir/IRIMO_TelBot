@@ -240,6 +240,33 @@ def user_info(message):
 
 
 
+@bot.message_handler(commands=['users_count'])
+def users_count(message):
+    user_id = message.from_user.id
+    if str(user_id) != str(ADMIN_ID):
+        bot.reply_to(message, "⛔ You are not authorized to use this command.")
+        return
+
+    conn = sqlite3.connect("users.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT COUNT(DISTINCT user_id)
+        FROM downloads
+    """)
+
+    count = cur.fetchone()[0]
+    conn.close()
+
+    bot.reply_to(
+        message,
+        f"👥 تعداد کل کاربران:\n{count}"
+    )
+
+
+
+
+
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     user_id = call.from_user.id
