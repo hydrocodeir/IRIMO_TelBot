@@ -208,8 +208,3 @@ __marimo__/
 
 # Parquet files
 *.parquet
-
-
-# db
-*.db
-*.sqlite
