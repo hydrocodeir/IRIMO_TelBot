@@ -5,11 +5,14 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "aiogram>=3.23.0",
+    "aiosqlite>=0.22.0",
     "fastapi>=0.116.1",
     "pandas>=2.3.2",
-    "polars>=1.33.1",
+    "polars-lts-cpu>=1.33.1",
     "pyarrow>=21.0.0",
     "pytelegrambotapi>=4.29.1",
     "python-dotenv>=1.1.1",
+    "rapidfuzz>=3.14.3",
     "uvicorn>=0.35.0",
 ]
