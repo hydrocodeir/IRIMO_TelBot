@@ -62,12 +62,28 @@ except Exception as e:
 bot = telebot.TeleBot(API_TOKEN)
 
 # ---------- HELPER FUNCTIONS ----------
-def can_download(user_id):
+def can_download_daily(user_id):
     if str(user_id) == str(ADMIN_ID):
         return True
     today = date.today().isoformat()
     cursor.execute("SELECT * FROM downloads WHERE user_id=? AND download_date=?", (user_id, today))
     return cursor.fetchone() is None
+
+def can_download_monthly(user_id):
+    if str(user_id) == str(ADMIN_ID):
+        return True
+    today = date.today()
+    month_start = today.replace(day=1).isoformat()
+
+    cursor.execute("""
+        SELECT COUNT(*) FROM downloads
+        WHERE user_id = ?
+        AND download_date >= ?
+    """, (user_id, month_start))
+
+    count = cursor.fetchone()[0]
+
+    return count < 10
 
 def log_download(user_id, username, station_name):
     today = date.today().isoformat()
@@ -310,8 +326,8 @@ def callback_handler(call):
         return
 
     # ---------- Check download limit ----------
-    if not can_download(user_id):
-        bot.answer_callback_query(call.id, "❌ You have already downloaded a station today.")
+    if not can_download_daily(user_id) and not can_download_monthly(user_id):
+        bot.answer_callback_query(call.id, "❌ You have already downloaded a station today or reached the 10-stations-per-month limit.")
         return
 
     # ---------- Back button ----------
