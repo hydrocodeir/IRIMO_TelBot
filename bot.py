@@ -326,7 +326,7 @@ def callback_handler(call):
         return
 
     # ---------- Check download limit ----------
-    if not can_download_daily(user_id) and not can_download_monthly(user_id):
+    if not can_download_daily(user_id) or not can_download_monthly(user_id):
         bot.answer_callback_query(call.id, "❌ You have already downloaded a station today or reached the 10-stations-per-month limit.")
         return
 
