@@ -62,15 +62,16 @@ except Exception as e:
 bot = telebot.TeleBot(API_TOKEN)
 
 # ---------- HELPER FUNCTIONS ----------
+EXCLUDE_IDs = [str(ADMIN_ID), str(107479525)]
 def can_download_daily(user_id):
-    if str(user_id) == str(ADMIN_ID):
+    if str(user_id) in EXCLUDE_IDs:
         return True
     today = date.today().isoformat()
     cursor.execute("SELECT * FROM downloads WHERE user_id=? AND download_date=?", (user_id, today))
     return cursor.fetchone() is None
 
 def can_download_monthly(user_id):
-    if str(user_id) == str(ADMIN_ID):
+    if str(user_id) in EXCLUDE_IDs:
         return True
     today = date.today()
     month_start = today.replace(day=1).isoformat()
