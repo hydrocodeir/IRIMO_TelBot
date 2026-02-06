@@ -179,6 +179,17 @@ def safe_edit_message_reply_markup(bot, chat_id, message_id, reply_markup=None, 
         if "message is not modified" in str(e):
             return None
         raise
+
+
+def safe_answer_callback_query(bot, call_id, text=None, show_alert=False, **kwargs):
+    """Safely answer callback queries. If already answered or expired, ignore."""
+    try:
+        if text is None:
+            return bot.answer_callback_query(call_id, **kwargs)
+        return bot.answer_callback_query(call_id, text, show_alert=show_alert, **kwargs)
+    except Exception:
+        return None
+
 # ---------------------------------------------------
 
 # ---------- RATE LIMIT HELPERS ----------
@@ -257,6 +268,39 @@ def build_keyboard(options: list[str], callback_prefix: str, page: int = 0) -> I
 
     return markup
 
+# ---------- MAIN MENU (Province list + utilities) ----------
+def build_region_menu(user_id: int, page: int = 0) -> InlineKeyboardMarkup:
+    """Province selection keyboard plus utility buttons (e.g., download limit)."""
+    markup = build_keyboard(REGIONS, "region", page)
+    # Utility button that used to exist before optimizations
+    markup.row(
+        InlineKeyboardButton("📊 Check download limit", callback_data="check_download_limit")
+    )
+    markup = _add_admin_button(markup, user_id)
+    return markup
+
+def get_download_usage(user_id: int) -> tuple[int, int, int, int]:
+    """Return (daily_used, daily_limit, monthly_used, monthly_limit)."""
+    # Excluded IDs effectively have no limits
+    if str(user_id) in EXCLUDE_IDs:
+        return (0, 10**9, 0, 10**9)
+
+    today = time.strftime("%Y-%m-%d")
+    month_start = today[:8] + "01"
+
+    daily_used = 1 if _db_fetchone(
+        "SELECT 1 FROM downloads WHERE user_id=? AND download_date=? LIMIT 1",
+        (user_id, today)
+    ) else 0
+
+    row = _db_fetchone(
+        "SELECT COUNT(*) FROM downloads WHERE user_id=? AND download_date >= ?",
+        (user_id, month_start)
+    )
+    monthly_used = int(row[0]) if row else 0
+
+    return (daily_used, 1, monthly_used, 10)
+
 def _add_admin_button(markup: InlineKeyboardMarkup, user_id: int) -> InlineKeyboardMarkup:
     if str(user_id) == str(ADMIN_ID):
         markup.add(InlineKeyboardButton("📊 Admin Report", callback_data="admin_report"))
@@ -295,8 +339,7 @@ def start(message):
     user_id = message.from_user.id
     username = message.from_user.username or message.from_user.first_name
 
-    markup = build_keyboard(REGIONS, "region")
-    markup = _add_admin_button(markup, user_id)
+    markup = build_region_menu(user_id)
     bot.send_message(message.chat.id, f"👋 Welcome {username}!\nPlease select a province:", reply_markup=markup)
 
 @bot.message_handler(commands=['help'])
@@ -394,15 +437,11 @@ def callback_handler(call):
     username = call.from_user.username or call.from_user.first_name
     chat_id = call.message.chat.id
     message_id = call.message.message_id
-
-    # End Telegram "loading..." quickly
-    try:
-        bot.answer_callback_query(call.id)
-    except Exception:
-        pass
+    answered = False
 
     # Debounce repeated taps
     if is_debounced(chat_id, message_id, call.data):
+        safe_answer_callback_query(bot, call.id)
         return
 
     # ---------- Admin report ----------
@@ -419,8 +458,7 @@ def callback_handler(call):
         page = int(page_str)
 
         if prefix.startswith("region"):
-            markup = build_keyboard(REGIONS, "region", page)
-            markup = _add_admin_button(markup, user_id)
+            markup = build_region_menu(user_id, page)
             safe_edit_message_reply_markup(bot, chat_id, message_id, reply_markup=markup)
             return
 
@@ -436,9 +474,32 @@ def callback_handler(call):
 
     # ---------- Back button ----------
     if call.data == "back_to_provinces":
-        markup = build_keyboard(REGIONS, "region")
-        markup = _add_admin_button(markup, user_id)
+        markup = build_region_menu(user_id)
         safe_edit_message_text(bot, "🔙 Back to province selection:", chat_id, message_id, reply_markup=markup)
+        return
+
+    # ---------- Check download limit (menu utility) ----------
+    if call.data == "check_download_limit":
+        daily_used, daily_limit, monthly_used, monthly_limit = get_download_usage(user_id)
+
+        if str(user_id) in EXCLUDE_IDs:
+            text = "✅ No download limits apply to your account."
+        else:
+            daily_left = max(0, daily_limit - daily_used)
+            monthly_left = max(0, monthly_limit - monthly_used)
+            text = (
+                "📊 *Download limit*\n\n"
+                f"• Today: {daily_used}/{daily_limit} (remaining: {daily_left})\n"
+                f"• This month: {monthly_used}/{monthly_limit} (remaining: {monthly_left})"
+            )
+
+        # Show as an alert for instant visibility + keep menu intact
+        safe_answer_callback_query(bot, call.id, text.replace("*", ""), show_alert=True)
+        answered = True
+
+        # Also refresh markup (in case it disappeared due to earlier edits)
+        markup = build_region_menu(user_id)
+        safe_edit_message_reply_markup(bot, chat_id, message_id, reply_markup=markup)
         return
 
     # ---------- Region selection ----------
@@ -473,14 +534,13 @@ def callback_handler(call):
 
         # ---------- Check download limit ----------
         if not can_download_daily(user_id) or not can_download_monthly(user_id):
-            try:
-                bot.answer_callback_query(
-                    call.id,
-                    "❌ You have already downloaded a station today or reached the 10-stations-per-month limit.",
-                    show_alert=True
-                )
-            except Exception:
-                pass
+            safe_answer_callback_query(
+                bot,
+                call.id,
+                "❌ You have already downloaded a station today or reached the 10-stations-per-month limit.",
+                show_alert=True
+            )
+            answered = True
             return
 
         min_date, max_date = get_date_range(region, station)
@@ -505,10 +565,13 @@ def callback_handler(call):
         log_download(user_id, username, station)
 
         # Offer start menu again (single message)
-        markup = build_keyboard(REGIONS, "region")
-        markup = _add_admin_button(markup, user_id)
+        markup = build_region_menu(user_id)
         bot.send_message(chat_id, "Please select a province again:", reply_markup=markup)
         return
+
+    # Fallback: ensure callback is answered (removes Telegram loading state)
+    if not answered:
+        safe_answer_callback_query(bot, call.id)
 
 # ---------- MAIN ----------
 def run_bot():
