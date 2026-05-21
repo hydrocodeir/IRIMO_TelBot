@@ -21,6 +21,7 @@ PDF_GUIDE_FILE = os.environ.get("GUIDE_PATH", "Help.pdf")
 DB_PATH = "users.db"
 BUTTONS_PER_ROW = 2
 PAGE_SIZE = 16
+REQUIRED_CHANNELS = ["@HydroCodeChannel", "@weri_fum"]
 # ----------------------------
 
 # ---------- DATABASE SETUP ----------
@@ -32,6 +33,14 @@ CREATE TABLE IF NOT EXISTS downloads (
     username TEXT,
     station_name TEXT,
     download_date TEXT
+)
+""")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    first_name TEXT,
+    joined_at TEXT
 )
 """)
 conn.commit()
@@ -63,6 +72,46 @@ bot = telebot.TeleBot(API_TOKEN)
 
 # ---------- HELPER FUNCTIONS ----------
 EXCLUDE_IDs = [str(ADMIN_ID), str(107479525)]
+
+def register_user(user):
+    cursor.execute(
+        """
+        INSERT INTO users (user_id, username, first_name, joined_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username=excluded.username,
+            first_name=excluded.first_name
+        """,
+        (
+            user.id,
+            user.username,
+            user.first_name,
+            datetime.utcnow().isoformat()
+        )
+    )
+    conn.commit()
+
+def is_member_of_required_channels(user_id):
+    for channel in REQUIRED_CHANNELS:
+        try:
+            member = bot.get_chat_member(channel, user_id)
+            if member.status in ["left", "kicked"]:
+                return False
+        except Exception:
+            return False
+    return True
+
+def ensure_membership(message):
+    if str(message.from_user.id) == str(ADMIN_ID):
+        return True
+    if is_member_of_required_channels(message.from_user.id):
+        return True
+    channels_text = "\n".join([f"• {c}" for c in REQUIRED_CHANNELS])
+    bot.reply_to(
+        message,
+        f"⛔ برای استفاده از ربات ابتدا باید در این کانال‌ها عضو شوید:\n{channels_text}\n\nپس از عضویت دوباره /start را بزنید."
+    )
+    return False
 def can_download_daily(user_id):
     if str(user_id) in EXCLUDE_IDs:
         return True
@@ -140,6 +189,9 @@ def build_keyboard(options, callback_prefix, page=0):
 # ---------- BOT HANDLERS ----------
 @bot.message_handler(commands=['start'])
 def start(message):
+    register_user(message.from_user)
+    if not ensure_membership(message):
+        return
     user_id = message.from_user.id
     username = message.from_user.username or message.from_user.first_name
     # regions = sorted(df['region_name'].unique())
@@ -151,6 +203,9 @@ def start(message):
 
 @bot.message_handler(commands=['help'])
 def help_command(message):
+    register_user(message.from_user)
+    if not ensure_membership(message):
+        return
     bot.send_message(
         message.chat.id,
         "ℹ️ *Help & Usage Guide*\n\n"
@@ -264,20 +319,45 @@ def users_count(message):
         bot.reply_to(message, "⛔ You are not authorized to use this command.")
         return
 
-    conn = sqlite3.connect("users.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT COUNT(DISTINCT user_id)
-        FROM downloads
-    """)
-
-    count = cur.fetchone()[0]
-    conn.close()
+    cursor.execute("SELECT COUNT(*) FROM users")
+    count = cursor.fetchone()[0]
 
     bot.reply_to(
         message,
         f"👥 تعداد کل کاربران:\n{count}"
+    )
+
+
+@bot.message_handler(commands=['send'])
+def send_to_all(message):
+    user_id = message.from_user.id
+    if str(user_id) != str(ADMIN_ID):
+        bot.reply_to(message, "⛔ You are not authorized to use this command.")
+        return
+
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ این دستور باید روی یک پیام ریپلای شود.")
+        return
+
+    source_chat_id = message.reply_to_message.chat.id
+    source_message_id = message.reply_to_message.message_id
+
+    cursor.execute("SELECT user_id FROM users")
+    user_rows = cursor.fetchall()
+
+    sent_count = 0
+    fail_count = 0
+
+    for (target_user_id,) in user_rows:
+        try:
+            bot.copy_message(target_user_id, source_chat_id, source_message_id)
+            sent_count += 1
+        except Exception:
+            fail_count += 1
+
+    bot.reply_to(
+        message,
+        f"📣 ارسال همگانی انجام شد.\n✅ موفق: {sent_count}\n❌ ناموفق: {fail_count}"
     )
 
 
@@ -286,11 +366,22 @@ def users_count(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
+    register_user(call.from_user)
+
+    if str(call.from_user.id) != str(ADMIN_ID) and not is_member_of_required_channels(call.from_user.id):
+        channels_text = "\n".join([f"• {c}" for c in REQUIRED_CHANNELS])
+        bot.answer_callback_query(call.id, "ابتدا در کانال‌های اجباری عضو شوید.", show_alert=True)
+        bot.send_message(
+            call.message.chat.id,
+            f"⛔ برای ادامه استفاده از ربات ابتدا در این کانال‌ها عضو شوید:\n{channels_text}"
+        )
+        return
+
     user_id = call.from_user.id
     username = call.from_user.username or call.from_user.first_name
 
     # ---------- Admin report ----------
-    if call.data == "admin_report" and user_id == ADMIN_ID:
+    if call.data == "admin_report" and str(user_id) == str(ADMIN_ID):
         today = date.today().isoformat()
         cursor.execute("SELECT username, station_name FROM downloads WHERE download_date=?", (today,))
         rows = cursor.fetchall()
@@ -428,4 +519,3 @@ if __name__ == "__main__":
     bot_thread.start()
     while True:
         time.sleep(1)
-
