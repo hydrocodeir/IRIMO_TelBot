@@ -65,6 +65,33 @@ with DB_LOCK:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_downloads_date ON downloads(download_date)")
     conn.commit()
 
+def _ensure_users_table_schema() -> None:
+    """
+    Make users table backward-compatible with older deployments.
+    Some existing databases may already have `users` without `last_seen`.
+    """
+    with DB_LOCK:
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(users)")
+        rows = c.fetchall()
+        existing_columns = {row[1] for row in rows} if rows else set()
+
+        if not existing_columns:
+            c.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_seen TEXT
+            )
+            """)
+        elif "last_seen" not in existing_columns:
+            c.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
+
+        conn.commit()
+
+_ensure_users_table_schema()
+
 def _db_fetchone(sql: str, params=()):
     with DB_LOCK:
         c = conn.cursor()
