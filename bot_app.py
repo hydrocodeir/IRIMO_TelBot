@@ -27,6 +27,9 @@ PAGE_SIZE = 16
 # Debounce repeated callbacks (same button tapped multiple times quickly)
 DEBOUNCE_WINDOW_SECONDS = 1.5
 
+REQUIRED_CHANNELS = ["HydroCodeChannel", "weri_fum"]
+ALLOWED_MEMBERSHIP_STATUSES = {"creator", "administrator", "member"}
+
 # ----------------------------
 if not API_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
@@ -50,9 +53,44 @@ with DB_LOCK:
         download_date TEXT
     )
     """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        first_name TEXT,
+        last_seen TEXT
+    )
+    """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_downloads_user_date ON downloads(user_id, download_date)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_downloads_date ON downloads(download_date)")
     conn.commit()
+
+def _ensure_users_table_schema() -> None:
+    """
+    Make users table backward-compatible with older deployments.
+    Some existing databases may already have `users` without `last_seen`.
+    """
+    with DB_LOCK:
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(users)")
+        rows = c.fetchall()
+        existing_columns = {row[1] for row in rows} if rows else set()
+
+        if not existing_columns:
+            c.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_seen TEXT
+            )
+            """)
+        elif "last_seen" not in existing_columns:
+            c.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
+
+        conn.commit()
+
+_ensure_users_table_schema()
 
 def _db_fetchone(sql: str, params=()):
     with DB_LOCK:
@@ -191,6 +229,74 @@ def safe_answer_callback_query(bot, call_id, text=None, show_alert=False, **kwar
         return None
 
 # ---------------------------------------------------
+
+def upsert_user(user) -> None:
+    _db_execute(
+        """
+        INSERT INTO users(user_id, username, first_name, last_seen)
+        VALUES (?, ?, ?, date('now', 'localtime'))
+        ON CONFLICT(user_id) DO UPDATE SET
+            username=excluded.username,
+            first_name=excluded.first_name,
+            last_seen=date('now', 'localtime')
+        """,
+        (user.id, user.username, user.first_name)
+    )
+
+def _membership_ok(member) -> bool:
+    status = getattr(member, "status", "")
+    if status in ALLOWED_MEMBERSHIP_STATUSES:
+        return True
+    if status == "restricted":
+        return bool(getattr(member, "is_member", False))
+    return False
+
+def get_channel_membership_state(user_id: int) -> tuple[list[str], list[str]]:
+    """
+    Returns (missing_channels, unknown_channels).
+    unknown_channels means membership could not be verified (e.g., bot lacks access).
+    """
+    missing: list[str] = []
+    unknown: list[str] = []
+    for channel in REQUIRED_CHANNELS:
+        channel_ref = f"@{channel}"
+        try:
+            member = bot.get_chat_member(channel_ref, user_id)
+            if not _membership_ok(member):
+                missing.append(channel_ref)
+        except Exception:
+            unknown.append(channel_ref)
+    return missing, unknown
+
+def build_join_channels_markup() -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup()
+    for channel in REQUIRED_CHANNELS:
+        markup.add(InlineKeyboardButton(f"عضویت در @{channel}", url=f"https://t.me/{channel}"))
+    markup.add(InlineKeyboardButton("✅ بررسی عضویت", callback_data="check_join"))
+    return markup
+
+def require_membership(message_or_call) -> bool:
+    user_id = message_or_call.from_user.id
+    if hasattr(message_or_call, "message"):
+        chat_id = message_or_call.message.chat.id
+    else:
+        chat_id = message_or_call.chat.id
+
+    missing, unknown = get_channel_membership_state(user_id)
+    if not missing:
+        return True
+
+    text = "برای استفاده از ربات باید در کانال‌های زیر عضو باشید:\n" + "\n".join(f"• {c}" for c in missing)
+    if unknown:
+        text += (
+            "\n\n⚠️ وضعیت عضویت در برخی کانال‌ها قابل بررسی نیست. "
+            "اگر عضو هستید ولی باز خطا می‌بینید، ادمین باید ربات را داخل کانال‌ها اضافه کند."
+        )
+    markup = build_join_channels_markup()
+    if hasattr(message_or_call, "data"):
+        safe_answer_callback_query(bot, message_or_call.id, "ابتدا در کانال‌ها عضو شوید.", show_alert=True)
+    bot.send_message(chat_id, text, reply_markup=markup)
+    return False
 
 # ---------- RATE LIMIT HELPERS ----------
 # For each (chat_id, message_id) remember last callback_data + timestamp
@@ -338,6 +444,10 @@ def _send_station_csv(chat_id: int, region: str, station: str, min_date: str, ma
 def start(message):
     user_id = message.from_user.id
     username = message.from_user.username or message.from_user.first_name
+    upsert_user(message.from_user)
+
+    if not require_membership(message):
+        return
 
     markup = build_region_menu(user_id)
     bot.send_message(message.chat.id, f"👋 Welcome {username}!\nPlease select a province:", reply_markup=markup)
@@ -431,8 +541,35 @@ def users_count(message):
     count = row[0] if row else 0
     bot.reply_to(message, f"👥 تعداد کل کاربران:\n{count}")
 
+@bot.message_handler(commands=['send'])
+def send_to_all(message):
+    user_id = message.from_user.id
+    if str(user_id) != str(ADMIN_ID):
+        bot.reply_to(message, "⛔ You are not authorized to use this command.")
+        return
+
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ روی یک پیام ریپلای کنید و /send بزنید.")
+        return
+
+    source_msg = message.reply_to_message
+    rows = _db_fetchall("SELECT user_id FROM users")
+    recipients = sorted({int(r[0]) for r in rows if r and r[0]})
+
+    success = 0
+    failed = 0
+    for uid in recipients:
+        try:
+            bot.copy_message(uid, message.chat.id, source_msg.message_id)
+            success += 1
+        except Exception:
+            failed += 1
+
+    bot.reply_to(message, f"✅ ارسال انجام شد. موفق: {success} | ناموفق: {failed}")
+
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
+    upsert_user(call.from_user)
     user_id = call.from_user.id
     username = call.from_user.username or call.from_user.first_name
     chat_id = call.message.chat.id
@@ -442,6 +579,24 @@ def callback_handler(call):
     # Debounce repeated taps
     if is_debounced(chat_id, message_id, call.data):
         safe_answer_callback_query(bot, call.id)
+        return
+
+    if call.data == "check_join":
+        missing, unknown = get_channel_membership_state(user_id)
+        if missing:
+            safe_answer_callback_query(bot, call.id, "هنوز عضو همه کانال‌ها نیستید.", show_alert=True)
+            msg = "لطفا ابتدا عضو شوید و دوباره بررسی کنید."
+            if unknown:
+                msg += "\n\n⚠️ بررسی برخی کانال‌ها ممکن نیست؛ ربات باید در کانال‌ها عضو باشد."
+            bot.send_message(chat_id, msg, reply_markup=build_join_channels_markup())
+            return
+
+        safe_answer_callback_query(bot, call.id, "عضویت تایید شد ✅")
+        markup = build_region_menu(user_id)
+        bot.send_message(chat_id, "✅ عضویت شما تایید شد. حالا می‌توانید از ربات استفاده کنید.", reply_markup=markup)
+        return
+
+    if not require_membership(call):
         return
 
     # ---------- Admin report ----------
