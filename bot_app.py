@@ -251,8 +251,13 @@ def _membership_ok(member) -> bool:
         return bool(getattr(member, "is_member", False))
     return False
 
-def get_missing_channels(user_id: int) -> list[str]:
+def get_channel_membership_state(user_id: int) -> tuple[list[str], list[str]]:
+    """
+    Returns (missing_channels, unknown_channels).
+    unknown_channels means membership could not be verified (e.g., bot lacks access).
+    """
     missing: list[str] = []
+    unknown: list[str] = []
     for channel in REQUIRED_CHANNELS:
         channel_ref = f"@{channel}"
         try:
@@ -260,8 +265,8 @@ def get_missing_channels(user_id: int) -> list[str]:
             if not _membership_ok(member):
                 missing.append(channel_ref)
         except Exception:
-            missing.append(channel_ref)
-    return missing
+            unknown.append(channel_ref)
+    return missing, unknown
 
 def build_join_channels_markup() -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup()
@@ -277,11 +282,16 @@ def require_membership(message_or_call) -> bool:
     else:
         chat_id = message_or_call.chat.id
 
-    missing = get_missing_channels(user_id)
+    missing, unknown = get_channel_membership_state(user_id)
     if not missing:
         return True
 
     text = "برای استفاده از ربات باید در کانال‌های زیر عضو باشید:\n" + "\n".join(f"• {c}" for c in missing)
+    if unknown:
+        text += (
+            "\n\n⚠️ وضعیت عضویت در برخی کانال‌ها قابل بررسی نیست. "
+            "اگر عضو هستید ولی باز خطا می‌بینید، ادمین باید ربات را داخل کانال‌ها اضافه کند."
+        )
     markup = build_join_channels_markup()
     if hasattr(message_or_call, "data"):
         safe_answer_callback_query(bot, message_or_call.id, "ابتدا در کانال‌ها عضو شوید.", show_alert=True)
@@ -572,10 +582,13 @@ def callback_handler(call):
         return
 
     if call.data == "check_join":
-        missing = get_missing_channels(user_id)
+        missing, unknown = get_channel_membership_state(user_id)
         if missing:
             safe_answer_callback_query(bot, call.id, "هنوز عضو همه کانال‌ها نیستید.", show_alert=True)
-            bot.send_message(chat_id, "لطفا ابتدا عضو شوید و دوباره بررسی کنید.", reply_markup=build_join_channels_markup())
+            msg = "لطفا ابتدا عضو شوید و دوباره بررسی کنید."
+            if unknown:
+                msg += "\n\n⚠️ بررسی برخی کانال‌ها ممکن نیست؛ ربات باید در کانال‌ها عضو باشد."
+            bot.send_message(chat_id, msg, reply_markup=build_join_channels_markup())
             return
 
         safe_answer_callback_query(bot, call.id, "عضویت تایید شد ✅")
