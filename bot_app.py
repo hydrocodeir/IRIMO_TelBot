@@ -27,7 +27,7 @@ PAGE_SIZE = 16
 # Debounce repeated callbacks (same button tapped multiple times quickly)
 DEBOUNCE_WINDOW_SECONDS = 1.5
 
-REQUIRED_CHANNELS = ["HydroCodeChannel", "weri_fum"]
+REQUIRED_CHANNELS = ["HydroCodeChannel"]
 ALLOWED_MEMBERSHIP_STATUSES = {"creator", "administrator", "member"}
 
 # ----------------------------
