@@ -279,14 +279,17 @@ def require_membership(message_or_call) -> bool:
     user_id = message_or_call.from_user.id
     if hasattr(message_or_call, "message"):
         chat_id = message_or_call.message.chat.id
+        reply_to_message_id = message_or_call.message.message_id
     else:
         chat_id = message_or_call.chat.id
+        reply_to_message_id = None
 
     missing, unknown = get_channel_membership_state(user_id)
-    if not missing:
+    if not missing and not unknown:
         return True
 
-    text = "برای استفاده از ربات باید در کانال‌های زیر عضو باشید:\n" + "\n".join(f"• {c}" for c in missing)
+    blocked_channels = missing + unknown
+    text = "برای استفاده از ربات باید در کانال‌های زیر عضو باشید:\n" + "\n".join(f"• {c}" for c in blocked_channels)
     if unknown:
         text += (
             "\n\n⚠️ وضعیت عضویت در برخی کانال‌ها قابل بررسی نیست. "
@@ -295,7 +298,10 @@ def require_membership(message_or_call) -> bool:
     markup = build_join_channels_markup()
     if hasattr(message_or_call, "data"):
         safe_answer_callback_query(bot, message_or_call.id, "ابتدا در کانال‌ها عضو شوید.", show_alert=True)
-    bot.send_message(chat_id, text, reply_markup=markup)
+    send_kwargs = {"reply_markup": markup}
+    if reply_to_message_id is not None:
+        send_kwargs["reply_to_message_id"] = reply_to_message_id
+    bot.send_message(chat_id, text, **send_kwargs)
     return False
 
 # ---------- RATE LIMIT HELPERS ----------
@@ -454,6 +460,9 @@ def start(message):
 
 @bot.message_handler(commands=['help'])
 def help_command(message):
+    if not require_membership(message):
+        return
+
     bot.send_message(
         message.chat.id,
         "ℹ️ *Help & Usage Guide*\n\n"
@@ -468,6 +477,8 @@ def help_command(message):
 @bot.message_handler(commands=['report'])
 def report_command(message):
     user_id = message.from_user.id
+    if not require_membership(message):
+        return
     if str(user_id) != str(ADMIN_ID):
         bot.reply_to(message, "⛔ You are not authorized to use this command.")
         return
@@ -492,6 +503,8 @@ def report_command(message):
 @bot.message_handler(commands=['user'])
 def user_info(message):
     user_id = message.from_user.id
+    if not require_membership(message):
+        return
     if str(user_id) != str(ADMIN_ID):
         bot.reply_to(message, "⛔ You are not authorized to use this command.")
         return
@@ -533,6 +546,8 @@ def user_info(message):
 @bot.message_handler(commands=['users_count'])
 def users_count(message):
     user_id = message.from_user.id
+    if not require_membership(message):
+        return
     if str(user_id) != str(ADMIN_ID):
         bot.reply_to(message, "⛔ You are not authorized to use this command.")
         return
@@ -544,6 +559,8 @@ def users_count(message):
 @bot.message_handler(commands=['send'])
 def send_to_all(message):
     user_id = message.from_user.id
+    if not require_membership(message):
+        return
     if str(user_id) != str(ADMIN_ID):
         bot.reply_to(message, "⛔ You are not authorized to use this command.")
         return
@@ -583,7 +600,7 @@ def callback_handler(call):
 
     if call.data == "check_join":
         missing, unknown = get_channel_membership_state(user_id)
-        if missing:
+        if missing or unknown:
             safe_answer_callback_query(bot, call.id, "هنوز عضو همه کانال‌ها نیستید.", show_alert=True)
             msg = "لطفا ابتدا عضو شوید و دوباره بررسی کنید."
             if unknown:
