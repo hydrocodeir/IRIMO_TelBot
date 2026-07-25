@@ -61,6 +61,12 @@ with DB_LOCK:
         last_seen TEXT
     )
     """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS download_limit_exemptions (
+        user_id INTEGER PRIMARY KEY,
+        added_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+    """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_downloads_user_date ON downloads(user_id, download_date)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_downloads_date ON downloads(download_date)")
     conn.commit()
@@ -318,17 +324,54 @@ def is_debounced(chat_id: int, message_id: int, callback_data: str) -> bool:
     return False
 
 # ---------- HELPER FUNCTIONS ----------
-EXCLUDE_IDs = {str(ADMIN_ID), "107479525"}  # daily/monthly limits won't apply to these
+STATIC_EXCLUDE_IDS = {str(ADMIN_ID), "107479525"}
+
+def is_main_admin(user_id: int) -> bool:
+    return str(user_id) == str(ADMIN_ID)
+
+def is_download_limit_exempt(user_id: int) -> bool:
+    """Return True for permanent or admin-managed download-limit exemptions."""
+    if str(user_id) in STATIC_EXCLUDE_IDS:
+        return True
+    row = _db_fetchone(
+        "SELECT 1 FROM download_limit_exemptions WHERE user_id=?",
+        (user_id,)
+    )
+    return row is not None
+
+def add_download_limit_exemption(user_id: int) -> bool:
+    """Add an exemption and return True only when a new row was created."""
+    with DB_LOCK:
+        c = conn.cursor()
+        c.execute(
+            "INSERT OR IGNORE INTO download_limit_exemptions(user_id) VALUES (?)",
+            (user_id,)
+        )
+        created = c.rowcount > 0
+        conn.commit()
+        return created
+
+def remove_download_limit_exemption(user_id: int) -> bool:
+    """Remove a managed exemption and return True when it existed."""
+    with DB_LOCK:
+        c = conn.cursor()
+        c.execute(
+            "DELETE FROM download_limit_exemptions WHERE user_id=?",
+            (user_id,)
+        )
+        removed = c.rowcount > 0
+        conn.commit()
+        return removed
 
 def can_download_daily(user_id: int) -> bool:
-    if str(user_id) in EXCLUDE_IDs:
+    if is_download_limit_exempt(user_id):
         return True
     today = time.strftime("%Y-%m-%d")
     row = _db_fetchone("SELECT 1 FROM downloads WHERE user_id=? AND download_date=? LIMIT 1", (user_id, today))
     return row is None
 
 def can_download_monthly(user_id: int) -> bool:
-    if str(user_id) in EXCLUDE_IDs:
+    if is_download_limit_exempt(user_id):
         return True
     today = time.strftime("%Y-%m-%d")
     month_start = today[:8] + "01"
@@ -394,7 +437,7 @@ def build_region_menu(user_id: int, page: int = 0) -> InlineKeyboardMarkup:
 def get_download_usage(user_id: int) -> tuple[int, int, int, int]:
     """Return (daily_used, daily_limit, monthly_used, monthly_limit)."""
     # Excluded IDs effectively have no limits
-    if str(user_id) in EXCLUDE_IDs:
+    if is_download_limit_exempt(user_id):
         return (0, 10**9, 0, 10**9)
 
     today = time.strftime("%Y-%m-%d")
@@ -414,9 +457,50 @@ def get_download_usage(user_id: int) -> tuple[int, int, int, int]:
     return (daily_used, 1, monthly_used, 10)
 
 def _add_admin_button(markup: InlineKeyboardMarkup, user_id: int) -> InlineKeyboardMarkup:
-    if str(user_id) == str(ADMIN_ID):
-        markup.add(InlineKeyboardButton("📊 Admin Report", callback_data="admin_report"))
+    if is_main_admin(user_id):
+        markup.row(
+            InlineKeyboardButton("📊 Admin Report", callback_data="admin_report"),
+            InlineKeyboardButton("🔓 مدیریت محدودیت", callback_data="admin_exemptions")
+        )
     return markup
+
+def build_exemptions_markup() -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup()
+    rows = _db_fetchall("""
+        SELECT e.user_id, u.username, u.first_name
+        FROM download_limit_exemptions AS e
+        LEFT JOIN users AS u ON u.user_id = e.user_id
+        ORDER BY e.added_at, e.user_id
+    """)
+    for uid, username, first_name in rows:
+        label = f"❌ {username or first_name or uid} ({uid})"
+        markup.add(InlineKeyboardButton(label, callback_data=f"exemption_remove|{uid}"))
+    markup.add(InlineKeyboardButton("➕ راهنمای افزودن", callback_data="exemption_add_help"))
+    markup.add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_provinces"))
+    return markup
+
+def exemptions_text() -> str:
+    rows = _db_fetchall("""
+        SELECT e.user_id, u.username, u.first_name
+        FROM download_limit_exemptions AS e
+        LEFT JOIN users AS u ON u.user_id = e.user_id
+        ORDER BY e.added_at, e.user_id
+    """)
+    if not rows:
+        listing = "فعلاً هیچ کاربری در فهرست قابل‌مدیریت نیست."
+    else:
+        listing = "\n".join(
+            f"• {uid} — {username or first_name or 'نامشخص'}"
+            for uid, username, first_name in rows
+        )
+    return (
+        "🔓 کاربران بدون محدودیت دانلود\n\n"
+        f"{listing}\n\n"
+        "افزودن: /limit_add user_id\n"
+        "حذف: /limit_remove user_id\n"
+        "نمایش فهرست: /limit_list\n\n"
+        "برای حذف سریع، روی دکمه همان کاربر بزنید."
+    )
 
 def _send_pdf(chat_id: int):
     if not PDF_BYTES:
@@ -556,6 +640,66 @@ def users_count(message):
     count = row[0] if row else 0
     bot.reply_to(message, f"👥 تعداد کل کاربران:\n{count}")
 
+def _parse_positive_user_id(message, command_name: str) -> int | None:
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        bot.reply_to(
+            message,
+            f"❌ فرمت صحیح:\n/{command_name} user_id\nمثال:\n/{command_name} 244146213"
+        )
+        return None
+    try:
+        user_id = int(parts[1])
+        if user_id <= 0:
+            raise ValueError
+        return user_id
+    except ValueError:
+        bot.reply_to(message, "❌ user_id باید یک عدد صحیح مثبت باشد.")
+        return None
+
+@bot.message_handler(commands=['limit_add'])
+def limit_add(message):
+    if not is_main_admin(message.from_user.id):
+        bot.reply_to(message, "⛔ شما اجازه استفاده از این دستور را ندارید.")
+        return
+    target_user_id = _parse_positive_user_id(message, "limit_add")
+    if target_user_id is None:
+        return
+    if str(target_user_id) in STATIC_EXCLUDE_IDS:
+        bot.reply_to(message, f"ℹ️ کاربر {target_user_id} از قبل استثنای ثابت است.")
+        return
+    if add_download_limit_exemption(target_user_id):
+        bot.reply_to(message, f"✅ محدودیت دانلود کاربر {target_user_id} برداشته شد.")
+    else:
+        bot.reply_to(message, f"ℹ️ محدودیت این کاربر قبلاً برداشته شده است.")
+
+@bot.message_handler(commands=['limit_remove'])
+def limit_remove(message):
+    if not is_main_admin(message.from_user.id):
+        bot.reply_to(message, "⛔ شما اجازه استفاده از این دستور را ندارید.")
+        return
+    target_user_id = _parse_positive_user_id(message, "limit_remove")
+    if target_user_id is None:
+        return
+    if str(target_user_id) in STATIC_EXCLUDE_IDS:
+        bot.reply_to(message, "⛔ استثنای ثابت مدیر/سیستم از داخل بات قابل حذف نیست.")
+        return
+    if remove_download_limit_exemption(target_user_id):
+        bot.reply_to(message, f"✅ محدودیت دانلود کاربر {target_user_id} دوباره فعال شد.")
+    else:
+        bot.reply_to(message, "ℹ️ این کاربر در فهرست بدون محدودیت نبود.")
+
+@bot.message_handler(commands=['limit_list'])
+def limit_list(message):
+    if not is_main_admin(message.from_user.id):
+        bot.reply_to(message, "⛔ شما اجازه استفاده از این دستور را ندارید.")
+        return
+    bot.send_message(
+        message.chat.id,
+        exemptions_text(),
+        reply_markup=build_exemptions_markup()
+    )
+
 @bot.message_handler(commands=['send'])
 def send_to_all(message):
     user_id = message.from_user.id
@@ -617,11 +761,62 @@ def callback_handler(call):
         return
 
     # ---------- Admin report ----------
-    if call.data == "admin_report" and str(user_id) == str(ADMIN_ID):
+    if call.data == "admin_report" and is_main_admin(user_id):
         today = time.strftime("%Y-%m-%d")
         rows = _db_fetchall("SELECT username, station_name FROM downloads WHERE download_date=?", (today,))
         report = "\n".join([f"{u} -> {s}" for u, s in rows]) if rows else "No downloads today."
         bot.send_message(chat_id, f"📊 Today's downloads:\n{report}")
+        return
+
+    # ---------- Admin download-limit exemptions ----------
+    if call.data == "admin_exemptions":
+        if not is_main_admin(user_id):
+            safe_answer_callback_query(bot, call.id, "دسترسی غیرمجاز", show_alert=True)
+            return
+        safe_edit_message_text(
+            bot,
+            exemptions_text(),
+            chat_id,
+            message_id,
+            reply_markup=build_exemptions_markup()
+        )
+        return
+
+    if call.data == "exemption_add_help":
+        if not is_main_admin(user_id):
+            safe_answer_callback_query(bot, call.id, "دسترسی غیرمجاز", show_alert=True)
+            return
+        safe_answer_callback_query(
+            bot,
+            call.id,
+            "برای افزودن ارسال کنید:\n/limit_add user_id",
+            show_alert=True
+        )
+        return
+
+    if call.data.startswith("exemption_remove|"):
+        if not is_main_admin(user_id):
+            safe_answer_callback_query(bot, call.id, "دسترسی غیرمجاز", show_alert=True)
+            return
+        try:
+            target_user_id = int(call.data.split("|", 1)[1])
+        except ValueError:
+            safe_answer_callback_query(bot, call.id, "شناسه نامعتبر است.", show_alert=True)
+            return
+        removed = remove_download_limit_exemption(target_user_id)
+        safe_answer_callback_query(
+            bot,
+            call.id,
+            "محدودیت کاربر دوباره فعال شد." if removed else "کاربر در فهرست نبود.",
+            show_alert=True
+        )
+        safe_edit_message_text(
+            bot,
+            exemptions_text(),
+            chat_id,
+            message_id,
+            reply_markup=build_exemptions_markup()
+        )
         return
 
     # ---------- Pagination ----------
@@ -654,7 +849,7 @@ def callback_handler(call):
     if call.data == "check_download_limit":
         daily_used, daily_limit, monthly_used, monthly_limit = get_download_usage(user_id)
 
-        if str(user_id) in EXCLUDE_IDs:
+        if is_download_limit_exempt(user_id):
             text = "✅ No download limits apply to your account."
         else:
             daily_left = max(0, daily_limit - daily_used)
