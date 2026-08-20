@@ -58,7 +58,7 @@ class DownloadLimitTests(unittest.TestCase):
         self.add_downloads(user_id, 1)
         allowed, reason = self.app.check_download_access(user_id, "تهران")
         self.assertFalse(allowed)
-        self.assertIn("سهمیه دانلود امروز", reason)
+        self.assertIn("download quota for today", reason)
 
         self.app._db_execute(
             "UPDATE daily_download_overrides SET override_date='2000-01-01' WHERE user_id=?",
@@ -66,7 +66,7 @@ class DownloadLimitTests(unittest.TestCase):
         )
         allowed, reason = self.app.check_download_access(user_id, "تهران")
         self.assertFalse(allowed)
-        self.assertIn("سهمیه روزانه", reason)
+        self.assertIn("daily limit", reason)
 
     def test_one_day_override_is_inactive_on_the_next_iran_day(self):
         user_id = 105
@@ -90,7 +90,7 @@ class DownloadLimitTests(unittest.TestCase):
 
         send.assert_called_once()
         self.assertEqual(send.call_args.args[0], user_id)
-        self.assertIn("کامل مصرف شد", send.call_args.args[1])
+        self.assertIn("used all", send.call_args.args[1])
         self.assertIsNone(self.app.get_active_daily_override(user_id))
 
     def test_user_is_notified_once_after_end_of_day(self):
@@ -106,7 +106,7 @@ class DownloadLimitTests(unittest.TestCase):
             self.assertEqual(self.app.process_completed_override_notifications(user_id), 0)
 
         send.assert_called_once()
-        self.assertIn("به پایان رسید", send.call_args.args[1])
+        self.assertIn("has expired", send.call_args.args[1])
 
     def test_region_mode_only_allows_selected_regions(self):
         user_id = 103

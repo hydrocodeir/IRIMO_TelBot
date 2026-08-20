@@ -321,8 +321,8 @@ def get_channel_membership_state(user_id: int) -> tuple[list[str], list[str]]:
 def build_join_channels_markup() -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup()
     for channel in REQUIRED_CHANNELS:
-        markup.add(InlineKeyboardButton(f"عضویت در @{channel}", url=f"https://t.me/{channel}"))
-    markup.add(InlineKeyboardButton("✅ بررسی عضویت", callback_data="check_join"))
+        markup.add(InlineKeyboardButton(f"Join @{channel}", url=f"https://t.me/{channel}"))
+    markup.add(InlineKeyboardButton("✅ Check membership", callback_data="check_join"))
     return markup
 
 def require_membership(message_or_call) -> bool:
@@ -339,15 +339,15 @@ def require_membership(message_or_call) -> bool:
         return True
 
     blocked_channels = missing + unknown
-    text = "برای استفاده از ربات باید در کانال‌های زیر عضو باشید:\n" + "\n".join(f"• {c}" for c in blocked_channels)
+    text = "To use this bot, you must join the following channels:\n" + "\n".join(f"• {c}" for c in blocked_channels)
     if unknown:
         text += (
-            "\n\n⚠️ وضعیت عضویت در برخی کانال‌ها قابل بررسی نیست. "
-            "اگر عضو هستید ولی باز خطا می‌بینید، ادمین باید ربات را داخل کانال‌ها اضافه کند."
+            "\n\n⚠️ Membership could not be checked for some channels. "
+            "If you have already joined, an admin must add the bot to those channels."
         )
     markup = build_join_channels_markup()
     if hasattr(message_or_call, "data"):
-        safe_answer_callback_query(bot, message_or_call.id, "ابتدا در کانال‌ها عضو شوید.", show_alert=True)
+        safe_answer_callback_query(bot, message_or_call.id, "Please join the required channels first.", show_alert=True)
     send_kwargs = {"reply_markup": markup}
     if reply_to_message_id is not None:
         send_kwargs["reply_to_message_id"] = reply_to_message_id
@@ -517,18 +517,18 @@ def check_download_access(user_id: int, region: str) -> tuple[bool, str | None]:
             daily_used, _ = _download_counts(user_id)
             if daily_used < daily_override["station_limit"]:
                 return True, None
-            return False, "❌ سهمیه دانلود امروز شما به پایان رسیده است."
+            return False, "❌ Your download quota for today has been used up."
 
         if region in daily_override["regions"]:
             return True, None
-        allowed = "، ".join(daily_override["regions"])
-        return False, f"❌ امروز فقط دانلود از این شهرستان‌ها مجاز است:\n{allowed}"
+        allowed = ", ".join(daily_override["regions"])
+        return False, f"❌ Today you may only download from these regions:\n{allowed}"
 
     daily_used, monthly_used = _download_counts(user_id)
     if daily_used >= NORMAL_DAILY_LIMIT:
-        return False, "❌ سهمیه روزانه شما (۱ ایستگاه) به پایان رسیده است."
+        return False, "❌ You have reached your daily limit (1 station)."
     if monthly_used >= NORMAL_MONTHLY_LIMIT:
-        return False, "❌ سهمیه ماهانه شما (۱۰ ایستگاه) به پایان رسیده است."
+        return False, "❌ You have reached your monthly limit (10 stations)."
     return True, None
 
 def send_limit_notification(user_id: int, text: str) -> bool:
@@ -558,19 +558,19 @@ def process_completed_override_notifications(user_id: int | None = None) -> int:
         message_text: str | None = None
         if override_date < today:
             message_text = (
-                "⏰ دسترسی موقت دانلود شما به پایان رسید.\n\n"
-                "🔒 محدودیت عادی شما دوباره فعال شد:\n"
-                f"• روزانه {NORMAL_DAILY_LIMIT} ایستگاه\n"
-                f"• ماهانه {NORMAL_MONTHLY_LIMIT} ایستگاه"
+                "⏰ Your temporary download access has expired.\n\n"
+                "🔒 Your standard limits are active again:\n"
+                f"• {NORMAL_DAILY_LIMIT} station per day\n"
+                f"• {NORMAL_MONTHLY_LIMIT} stations per month"
             )
         elif override_date == today and mode == "station_limit":
             daily_used, _ = _download_counts(uid)
             if daily_used >= int(station_limit):
                 message_text = (
-                    f"✅ سهمیه موقت {station_limit} ایستگاه امروز شما کامل مصرف شد.\n\n"
-                    "🔒 محدودیت عادی شما دوباره فعال شد:\n"
-                    f"• روزانه {NORMAL_DAILY_LIMIT} ایستگاه\n"
-                    f"• ماهانه {NORMAL_MONTHLY_LIMIT} ایستگاه"
+                    f"✅ You have used all {station_limit} stations in today's temporary quota.\n\n"
+                    "🔒 Your standard limits are active again:\n"
+                    f"• {NORMAL_DAILY_LIMIT} station per day\n"
+                    f"• {NORMAL_MONTHLY_LIMIT} stations per month"
                 )
 
         if message_text is None or not send_limit_notification(uid, message_text):
@@ -613,7 +613,7 @@ def get_date_range(region_name: str, station_name: str) -> tuple[str | None, str
     return DATE_RANGE_CACHE.get((region_name, station_name), (None, None))
 
 def build_keyboard(options: list[str], callback_prefix: str, page: int = 0) -> InlineKeyboardMarkup:
-    """ساخت کیبورد چندستونه با پیمایش"""
+    """Build a paginated multi-column keyboard."""
     markup = InlineKeyboardMarkup()
     start = page * PAGE_SIZE
     end = start + PAGE_SIZE
@@ -658,40 +658,40 @@ def build_region_menu(user_id: int, page: int = 0) -> InlineKeyboardMarkup:
 
 def download_limit_status_text(user_id: int) -> str:
     if is_download_limit_exempt(user_id):
-        return "✅ حساب شما محدودیت دانلود ندارد."
+        return "✅ No download limits apply to your account."
 
     daily_used, monthly_used = _download_counts(user_id)
     daily_override = get_active_daily_override(user_id)
     if daily_override and daily_override["mode"] == "station_limit":
         daily_limit = daily_override["station_limit"]
         return (
-            "📊 سهمیه موقت امروز\n\n"
-            f"• دانلود امروز: {daily_used}/{daily_limit}\n"
-            f"• باقی‌مانده: {max(0, daily_limit - daily_used)}\n"
-            "• پایان اعتبار: پایان امروز به وقت ایران"
+            "📊 Temporary quota for today\n\n"
+            f"• Downloads today: {daily_used}/{daily_limit}\n"
+            f"• Remaining: {max(0, daily_limit - daily_used)}\n"
+            "• Expires: End of today (Iran time)"
         )
     if daily_override and daily_override["mode"] == "regions":
-        allowed = "، ".join(daily_override["regions"])
+        allowed = ", ".join(daily_override["regions"])
         return (
-            "📍 دسترسی موقت شهرستانی امروز\n\n"
-            f"• شهرستان‌های مجاز: {allowed}\n"
-            f"• دانلود امروز: {daily_used}\n"
-            "• پایان اعتبار: پایان امروز به وقت ایران"
+            "📍 Temporary regional access for today\n\n"
+            f"• Allowed regions: {allowed}\n"
+            f"• Downloads today: {daily_used}\n"
+            "• Expires: End of today (Iran time)"
         )
 
     return (
-        "📊 محدودیت دانلود\n\n"
-        f"• امروز: {daily_used}/{NORMAL_DAILY_LIMIT} "
-        f"(باقی‌مانده: {max(0, NORMAL_DAILY_LIMIT - daily_used)})\n"
-        f"• این ماه: {monthly_used}/{NORMAL_MONTHLY_LIMIT} "
-        f"(باقی‌مانده: {max(0, NORMAL_MONTHLY_LIMIT - monthly_used)})"
+        "📊 Download limits\n\n"
+        f"• Today: {daily_used}/{NORMAL_DAILY_LIMIT} "
+        f"(remaining: {max(0, NORMAL_DAILY_LIMIT - daily_used)})\n"
+        f"• This month: {monthly_used}/{NORMAL_MONTHLY_LIMIT} "
+        f"(remaining: {max(0, NORMAL_MONTHLY_LIMIT - monthly_used)})"
     )
 
 def _add_admin_button(markup: InlineKeyboardMarkup, user_id: int) -> InlineKeyboardMarkup:
     if is_main_admin(user_id):
         markup.row(
             InlineKeyboardButton("📊 Admin Report", callback_data="admin_report"),
-            InlineKeyboardButton("🔓 مدیریت محدودیت", callback_data="admin_exemptions")
+            InlineKeyboardButton("🔓 Manage Limits", callback_data="admin_exemptions")
         )
     return markup
 
@@ -725,21 +725,21 @@ def build_limit_region_selection_markup(
     navigation = []
     if page > 0:
         navigation.append(
-            InlineKeyboardButton("⬅️ قبلی", callback_data=f"lrp|{session_id}|{page - 1}")
+            InlineKeyboardButton("⬅️ Previous", callback_data=f"lrp|{session_id}|{page - 1}")
         )
     if page < total_pages - 1:
         navigation.append(
-            InlineKeyboardButton("بعدی ➡️", callback_data=f"lrp|{session_id}|{page + 1}")
+            InlineKeyboardButton("Next ➡️", callback_data=f"lrp|{session_id}|{page + 1}")
         )
     if navigation:
         markup.row(*navigation)
 
     markup.row(
         InlineKeyboardButton(
-            f"✅ ثبت انتخاب‌ها ({len(selected_regions)})",
+            f"✅ Confirm ({len(selected_regions)})",
             callback_data=f"lrd|{session_id}"
         ),
-        InlineKeyboardButton("❌ لغو", callback_data=f"lrc|{session_id}")
+        InlineKeyboardButton("❌ Cancel", callback_data=f"lrc|{session_id}")
     )
     return markup
 
@@ -808,14 +808,14 @@ def build_exemptions_markup() -> InlineKeyboardMarkup:
         ORDER BY o.added_at, o.user_id
     """, (_today(),))
     for uid, username, first_name in permanent_rows:
-        label = f"❌ دائمی | {username or first_name or uid} ({uid})"
+        label = f"❌ Permanent | {username or first_name or uid} ({uid})"
         markup.add(InlineKeyboardButton(label, callback_data=f"exemption_remove|{uid}"))
     for uid, username, first_name, mode in daily_rows:
-        mode_label = "سهمیه امروز" if mode == "station_limit" else "شهرستان امروز"
+        mode_label = "Today's quota" if mode == "station_limit" else "Today's regions"
         label = f"❌ {mode_label} | {username or first_name or uid} ({uid})"
         markup.add(InlineKeyboardButton(label, callback_data=f"exemption_remove|{uid}"))
-    markup.add(InlineKeyboardButton("➕ راهنمای افزودن", callback_data="exemption_add_help"))
-    markup.add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_provinces"))
+    markup.add(InlineKeyboardButton("➕ Add Instructions", callback_data="exemption_add_help"))
+    markup.add(InlineKeyboardButton("🔙 Back", callback_data="back_to_provinces"))
     return markup
 
 def exemptions_text() -> str:
@@ -835,34 +835,34 @@ def exemptions_text() -> str:
     """, (_today(),))
 
     lines = [
-        f"• {uid} — {username or first_name or 'نامشخص'} — بدون محدودیت دائمی"
+        f"• {uid} — {username or first_name or 'Unknown'} — Permanently unlimited"
         for uid, username, first_name in permanent_rows
     ]
     for uid, username, first_name, mode, station_limit, encoded_regions in daily_rows:
-        name = username or first_name or "نامشخص"
+        name = username or first_name or "Unknown"
         if mode == "station_limit":
-            description = f"امروز تا {station_limit} ایستگاه"
+            description = f"Up to {station_limit} stations today"
         else:
             try:
                 regions = json.loads(encoded_regions)
             except (TypeError, json.JSONDecodeError):
                 regions = []
-            description = "امروز فقط: " + "، ".join(regions)
+            description = "Today only: " + ", ".join(regions)
         lines.append(f"• {uid} — {name} — {description}")
 
     if not lines:
-        listing = "فعلاً هیچ کاربری در فهرست قابل‌مدیریت نیست."
+        listing = "There are currently no managed limit overrides."
     else:
         listing = "\n".join(lines)
     return (
-        "🔓 مدیریت محدودیت دانلود\n\n"
+        "🔓 Download Limit Management\n\n"
         f"{listing}\n\n"
-        "۱) دائمی: /limit_add user_id\n"
-        "۲) سهمیه امروز: /limit_add user_id daily تعداد\n"
-        "۳) انتخاب مناطق امروز: /limit_add user_id regions\n"
-        "حذف: /limit_remove user_id\n"
-        "نمایش فهرست: /limit_list\n\n"
-        "برای حذف سریع، روی دکمه همان کاربر بزنید."
+        "1) Permanent: /limit_add user_id\n"
+        "2) Today's quota: /limit_add user_id daily count\n"
+        "3) Select today's regions: /limit_add user_id regions\n"
+        "Remove: /limit_remove user_id\n"
+        "List: /limit_list\n\n"
+        "For quick removal, tap the corresponding user button."
     )
 
 def _send_pdf(chat_id: int):
@@ -959,7 +959,7 @@ def user_info(message):
     try:
         parts = message.text.split()
         if len(parts) != 2:
-            bot.reply_to(message, "❌ فرمت صحیح:\n/user user_id\nمثال:\n/user 244146213")
+            bot.reply_to(message, "❌ Correct format:\n/user user_id\nExample:\n/user 244146213")
             return
 
         target_user_id = parts[1]
@@ -971,7 +971,7 @@ def user_info(message):
         """, (target_user_id,))
 
         if row is None or row[0] == 0:
-            bot.reply_to(message, f"ℹ️ اطلاعاتی برای user_id `{target_user_id}` پیدا نشد.", parse_mode="Markdown")
+            bot.reply_to(message, f"ℹ️ No information was found for user_id `{target_user_id}`.", parse_mode="Markdown")
             return
 
         total_downloads = row[0]
@@ -979,8 +979,8 @@ def user_info(message):
 
         response = (
             f"👤 *User ID:* `{target_user_id}`\n"
-            f"⬇️ *تعداد کل دانلودها:* {total_downloads}\n\n"
-            f"📡 *ایستگاه‌ها:*"
+            f"⬇️ *Total downloads:* {total_downloads}\n\n"
+            f"📡 *Stations:*"
         )
         for s in stations:
             response += f"\n• {s}"
@@ -988,7 +988,7 @@ def user_info(message):
         bot.reply_to(message, response, parse_mode="Markdown")
 
     except Exception as e:
-        bot.reply_to(message, f"⚠️ خطا:\n{str(e)}")
+        bot.reply_to(message, f"⚠️ Error:\n{str(e)}")
 
 @bot.message_handler(commands=['users_count'])
 def users_count(message):
@@ -1001,14 +1001,14 @@ def users_count(message):
 
     row = _db_fetchone("SELECT COUNT(DISTINCT user_id) FROM downloads")
     count = row[0] if row else 0
-    bot.reply_to(message, f"👥 تعداد کل کاربران:\n{count}")
+    bot.reply_to(message, f"👥 Total users:\n{count}")
 
 def _parse_positive_user_id(message, command_name: str) -> int | None:
     parts = (message.text or "").split()
     if len(parts) != 2:
         bot.reply_to(
             message,
-            f"❌ فرمت صحیح:\n/{command_name} user_id\nمثال:\n/{command_name} 244146213"
+            f"❌ Correct format:\n/{command_name} user_id\nExample:\n/{command_name} 244146213"
         )
         return None
     try:
@@ -1017,25 +1017,25 @@ def _parse_positive_user_id(message, command_name: str) -> int | None:
             raise ValueError
         return user_id
     except ValueError:
-        bot.reply_to(message, "❌ user_id باید یک عدد صحیح مثبت باشد.")
+        bot.reply_to(message, "❌ user_id must be a positive integer.")
         return None
 
 def _limit_add_help() -> str:
     return (
-        "فرمت‌های دستور /limit_add:\n\n"
-        "۱) حذف دائمی همه محدودیت‌ها:\n"
+        "/limit_add command formats:\n\n"
+        "1) Remove all limits permanently:\n"
         "/limit_add user_id\n"
         "/limit_add user_id permanent\n\n"
-        "۲) سهمیه تعداد ایستگاه فقط برای امروز:\n"
-        "/limit_add user_id daily تعداد\n"
-        "مثال: /limit_add 244146213 daily 5\n\n"
-        "۳) دسترسی امروز برای مناطق انتخابی:\n"
+        "2) Station quota for today only:\n"
+        "/limit_add user_id daily count\n"
+        "Example: /limit_add 244146213 daily 5\n\n"
+        "3) Access to selected regions today:\n"
         "/limit_add user_id regions\n"
-        "بعد از ارسال دستور، مناطق را با دکمه انتخاب و ثبت کنید.\n\n"
-        "روش متنی نیز پشتیبانی می‌شود:\n"
-        "/limit_add user_id regions نام۱، نام۲\n"
-        "مثال: /limit_add 244146213 regions Khorasan Razavi, North Khorasan\n\n"
-        "حالت‌های موقت در پایان امروز به وقت ایران خودکار غیرفعال می‌شوند."
+        "After sending the command, select regions using the buttons and confirm.\n\n"
+        "Text input is also supported:\n"
+        "/limit_add user_id regions name1, name2\n"
+        "Example: /limit_add 244146213 regions Khorasan Razavi, North Khorasan\n\n"
+        "Temporary overrides expire automatically at the end of today (Iran time)."
     )
 
 def _normalize_region_name(value: str) -> str:
@@ -1059,7 +1059,7 @@ def _resolve_regions(raw_regions: str) -> tuple[list[str], list[str]]:
 @bot.message_handler(commands=['limit_add'])
 def limit_add(message):
     if not is_main_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ شما اجازه استفاده از این دستور را ندارید.")
+        bot.reply_to(message, "⛔ You are not authorized to use this command.")
         return
 
     parts = (message.text or "").split(maxsplit=3)
@@ -1071,11 +1071,11 @@ def limit_add(message):
         if target_user_id <= 0:
             raise ValueError
     except ValueError:
-        bot.reply_to(message, "❌ user_id باید یک عدد صحیح مثبت باشد.\n\n" + _limit_add_help())
+        bot.reply_to(message, "❌ user_id must be a positive integer.\n\n" + _limit_add_help())
         return
 
     if str(target_user_id) in STATIC_EXCLUDE_IDS:
-        bot.reply_to(message, f"ℹ️ کاربر {target_user_id} از قبل استثنای ثابت است.")
+        bot.reply_to(message, f"ℹ️ User {target_user_id} is already a fixed system exemption.")
         return
 
     mode = parts[2].casefold() if len(parts) >= 3 else "permanent"
@@ -1084,43 +1084,43 @@ def limit_add(message):
         if created:
             notification_sent = send_limit_notification(
                 target_user_id,
-                "🔓 محدودیت دانلود حساب شما به‌صورت دائمی برداشته شد.\n"
-                "از این پس محدودیت روزانه و ماهانه برای شما اعمال نمی‌شود."
+                "🔓 Your download limits have been removed permanently.\n"
+                "Daily and monthly download limits no longer apply to your account."
             )
-            warning = "" if notification_sent else "\n⚠️ ارسال پیام به کاربر ممکن نبود."
+            warning = "" if notification_sent else "\n⚠️ The notification could not be sent to the user."
             bot.reply_to(
                 message,
-                f"✅ محدودیت کاربر {target_user_id} به‌صورت دائمی برداشته شد.{warning}"
+                f"✅ Download limits were permanently removed for user {target_user_id}.{warning}"
             )
         else:
-            bot.reply_to(message, f"ℹ️ کاربر {target_user_id} از قبل بدون محدودیت دائمی است.")
+            bot.reply_to(message, f"ℹ️ User {target_user_id} already has no permanent limits.")
         return
 
     if mode in {"2", "daily", "today", "count", "روزانه", "امروز"}:
         if len(parts) != 4:
-            bot.reply_to(message, "❌ تعداد ایستگاه مشخص نشده است.\n\n" + _limit_add_help())
+            bot.reply_to(message, "❌ The station count is missing.\n\n" + _limit_add_help())
             return
         try:
             station_limit = int(parts[3])
             if station_limit <= 0:
                 raise ValueError
         except ValueError:
-            bot.reply_to(message, "❌ تعداد ایستگاه باید یک عدد صحیح مثبت باشد.")
+            bot.reply_to(message, "❌ The station count must be a positive integer.")
             return
         set_daily_station_limit(target_user_id, station_limit)
         notification_sent = send_limit_notification(
             target_user_id,
-            "🔓 سهمیه دانلود امروز شما افزایش یافت.\n\n"
-            f"امروز می‌توانید در مجموع تا {station_limit} ایستگاه دانلود کنید.\n"
-            "پس از مصرف این سهمیه یا پایان امروز، محدودیت عادی دوباره فعال می‌شود."
+            "🔓 Your download quota for today has been increased.\n\n"
+            f"You may download up to {station_limit} stations in total today.\n"
+            "Your standard limits will return after this quota is used or at the end of today."
         )
         # If the user had already downloaded this many stations today, close
         # the override and notify them immediately instead of waiting 30s.
         process_completed_override_notifications(target_user_id)
-        warning = "" if notification_sent else "\n⚠️ ارسال پیام به کاربر ممکن نبود."
+        warning = "" if notification_sent else "\n⚠️ The notification could not be sent to the user."
         bot.reply_to(
             message,
-            f"✅ کاربر {target_user_id} تا پایان امروز اجازه دانلود {station_limit} ایستگاه را دارد."
+            f"✅ User {target_user_id} may download {station_limit} stations through the end of today."
             f"{warning}"
         )
         return
@@ -1128,78 +1128,78 @@ def limit_add(message):
     if mode in {"3", "regions", "region", "counties", "county", "شهرستان", "شهرستانها", "شهرستان‌ها"}:
         if len(parts) == 3:
             if not REGIONS:
-                bot.reply_to(message, "❌ فهرست مناطق در حال حاضر در دسترس نیست.")
+                bot.reply_to(message, "❌ The region list is currently unavailable.")
                 return
             _, markup = start_limit_region_selection(message.from_user.id, target_user_id)
             bot.reply_to(
                 message,
-                f"📍 مناطق مجاز امروز برای کاربر {target_user_id} را انتخاب کنید.\n"
-                "می‌توانید چند مورد را تیک بزنید و سپس «ثبت انتخاب‌ها» را بزنید.",
+                f"📍 Select today's allowed regions for user {target_user_id}.\n"
+                "You may select multiple regions, then tap Confirm.",
                 reply_markup=markup
             )
             return
         if len(parts) != 4:
-            bot.reply_to(message, "❌ نام شهرستان‌ها مشخص نشده است.\n\n" + _limit_add_help())
+            bot.reply_to(message, "❌ No region names were provided.\n\n" + _limit_add_help())
             return
         regions, invalid_regions = _resolve_regions(parts[3])
         if invalid_regions:
-            invalid_text = "، ".join(invalid_regions)
+            invalid_text = ", ".join(invalid_regions)
             bot.reply_to(
                 message,
-                f"❌ این نام‌ها در فهرست ربات پیدا نشدند:\n{invalid_text}\n\n"
-                "نام‌ها را دقیقاً مطابق دکمه‌های /start وارد کنید و با ویرگول جدا کنید."
+                f"❌ These names were not found in the bot's region list:\n{invalid_text}\n\n"
+                "Enter names exactly as shown by /start and separate them with commas."
             )
             return
         if not regions:
-            bot.reply_to(message, "❌ حداقل یک شهرستان معتبر وارد کنید.")
+            bot.reply_to(message, "❌ Enter at least one valid region.")
             return
         set_daily_region_override(target_user_id, regions)
-        regions_text = "، ".join(regions)
+        regions_text = ", ".join(regions)
         notification_sent = send_limit_notification(
             target_user_id,
-            "🔓 دسترسی موقت دانلود برای شما فعال شد.\n\n"
-            f"تا پایان امروز می‌توانید از این مناطق دانلود کنید:\n{regions_text}\n\n"
-            "در پایان امروز، محدودیت عادی شما دوباره فعال می‌شود."
+            "🔓 Temporary download access has been enabled for your account.\n\n"
+            f"You may download from these regions through the end of today:\n{regions_text}\n\n"
+            "Your standard limits will return at the end of today."
         )
-        warning = "" if notification_sent else "\n⚠️ ارسال پیام به کاربر ممکن نبود."
+        warning = "" if notification_sent else "\n⚠️ The notification could not be sent to the user."
         bot.reply_to(
             message,
-            f"✅ کاربر {target_user_id} تا پایان امروز فقط از این شهرستان‌ها دسترسی دارد:\n"
+            f"✅ User {target_user_id} may access only these regions through the end of today:\n"
             f"{regions_text}{warning}"
         )
         return
 
-    bot.reply_to(message, "❌ نوع محدودیت شناخته نشد.\n\n" + _limit_add_help())
+    bot.reply_to(message, "❌ Unknown limit mode.\n\n" + _limit_add_help())
 
 @bot.message_handler(commands=['limit_remove'])
 def limit_remove(message):
     if not is_main_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ شما اجازه استفاده از این دستور را ندارید.")
+        bot.reply_to(message, "⛔ You are not authorized to use this command.")
         return
     target_user_id = _parse_positive_user_id(message, "limit_remove")
     if target_user_id is None:
         return
     if str(target_user_id) in STATIC_EXCLUDE_IDS:
-        bot.reply_to(message, "⛔ استثنای ثابت مدیر/سیستم از داخل بات قابل حذف نیست.")
+        bot.reply_to(message, "⛔ A fixed admin/system exemption cannot be removed from the bot.")
         return
     if remove_download_limit_override(target_user_id):
         notification_sent = send_limit_notification(
             target_user_id,
-            "🔒 دسترسی ویژه دانلود شما توسط مدیر پایان یافت.\n"
-            "محدودیت عادی روزانه و ماهانه دوباره فعال شد."
+            "🔒 Your special download access was ended by an administrator.\n"
+            "Your standard daily and monthly limits are active again."
         )
-        warning = "" if notification_sent else "\n⚠️ ارسال پیام به کاربر ممکن نبود."
+        warning = "" if notification_sent else "\n⚠️ The notification could not be sent to the user."
         bot.reply_to(
             message,
-            f"✅ تنظیم ویژه کاربر {target_user_id} حذف و محدودیت عادی فعال شد.{warning}"
+            f"✅ The override for user {target_user_id} was removed and standard limits are active.{warning}"
         )
     else:
-        bot.reply_to(message, "ℹ️ این کاربر در فهرست بدون محدودیت نبود.")
+        bot.reply_to(message, "ℹ️ This user did not have a managed limit override.")
 
 @bot.message_handler(commands=['limit_list'])
 def limit_list(message):
     if not is_main_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ شما اجازه استفاده از این دستور را ندارید.")
+        bot.reply_to(message, "⛔ You are not authorized to use this command.")
         return
     bot.send_message(
         message.chat.id,
@@ -1217,7 +1217,7 @@ def send_to_all(message):
         return
 
     if not message.reply_to_message:
-        bot.reply_to(message, "❌ روی یک پیام ریپلای کنید و /send بزنید.")
+        bot.reply_to(message, "❌ Reply to a message and then send /send.")
         return
 
     source_msg = message.reply_to_message
@@ -1233,7 +1233,7 @@ def send_to_all(message):
         except Exception:
             failed += 1
 
-    bot.reply_to(message, f"✅ ارسال انجام شد. موفق: {success} | ناموفق: {failed}")
+    bot.reply_to(message, f"✅ Broadcast complete. Successful: {success} | Failed: {failed}")
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
@@ -1252,16 +1252,16 @@ def callback_handler(call):
     if call.data == "check_join":
         missing, unknown = get_channel_membership_state(user_id)
         if missing or unknown:
-            safe_answer_callback_query(bot, call.id, "هنوز عضو همه کانال‌ها نیستید.", show_alert=True)
-            msg = "لطفا ابتدا عضو شوید و دوباره بررسی کنید."
+            safe_answer_callback_query(bot, call.id, "You have not joined all required channels yet.", show_alert=True)
+            msg = "Please join the required channels and check again."
             if unknown:
-                msg += "\n\n⚠️ بررسی برخی کانال‌ها ممکن نیست؛ ربات باید در کانال‌ها عضو باشد."
+                msg += "\n\n⚠️ Some channels could not be checked; the bot must be a member of them."
             bot.send_message(chat_id, msg, reply_markup=build_join_channels_markup())
             return
 
-        safe_answer_callback_query(bot, call.id, "عضویت تایید شد ✅")
+        safe_answer_callback_query(bot, call.id, "Membership confirmed ✅")
         markup = build_region_menu(user_id)
-        bot.send_message(chat_id, "✅ عضویت شما تایید شد. حالا می‌توانید از ربات استفاده کنید.", reply_markup=markup)
+        bot.send_message(chat_id, "✅ Your membership was confirmed. You can now use the bot.", reply_markup=markup)
         return
 
     if not require_membership(call):
@@ -1270,7 +1270,7 @@ def callback_handler(call):
     # ---------- Interactive region selection for /limit_add ----------
     if call.data.startswith(("lrs|", "lrp|", "lrd|", "lrc|")):
         if not is_main_admin(user_id):
-            safe_answer_callback_query(bot, call.id, "دسترسی غیرمجاز", show_alert=True)
+            safe_answer_callback_query(bot, call.id, "Unauthorized access", show_alert=True)
             return
 
         callback_parts = call.data.split("|")
@@ -1280,7 +1280,7 @@ def callback_handler(call):
             safe_answer_callback_query(
                 bot,
                 call.id,
-                "این انتخاب منقضی شده است؛ دستور /limit_add را دوباره ارسال کنید.",
+                "This selection has expired. Send /limit_add again.",
                 show_alert=True
             )
             return
@@ -1291,11 +1291,11 @@ def callback_handler(call):
                 page = int(callback_parts[3])
                 region = REGIONS[region_index]
             except (IndexError, ValueError):
-                safe_answer_callback_query(bot, call.id, "انتخاب نامعتبر است.", show_alert=True)
+                safe_answer_callback_query(bot, call.id, "Invalid selection.", show_alert=True)
                 return
             selected = toggle_limit_region_selection(user_id, session_id, region)
             if selected is None:
-                safe_answer_callback_query(bot, call.id, "این انتخاب منقضی شده است.", show_alert=True)
+                safe_answer_callback_query(bot, call.id, "This selection has expired.", show_alert=True)
                 return
             safe_answer_callback_query(bot, call.id)
             safe_edit_message_reply_markup(
@@ -1310,7 +1310,7 @@ def callback_handler(call):
             try:
                 page = int(callback_parts[2])
             except (IndexError, ValueError):
-                safe_answer_callback_query(bot, call.id, "صفحه نامعتبر است.", show_alert=True)
+                safe_answer_callback_query(bot, call.id, "Invalid page.", show_alert=True)
                 return
             safe_answer_callback_query(bot, call.id)
             safe_edit_message_reply_markup(
@@ -1327,10 +1327,10 @@ def callback_handler(call):
 
         if call.data.startswith("lrc|"):
             pop_limit_region_selection(user_id, session_id)
-            safe_answer_callback_query(bot, call.id, "انتخاب مناطق لغو شد.")
+            safe_answer_callback_query(bot, call.id, "Region selection canceled.")
             safe_edit_message_text(
                 bot,
-                "❌ انتخاب مناطق لغو شد.",
+                "❌ Region selection canceled.",
                 chat_id,
                 message_id
             )
@@ -1341,7 +1341,7 @@ def callback_handler(call):
             safe_answer_callback_query(
                 bot,
                 call.id,
-                "حداقل یک منطقه را انتخاب کنید.",
+                "Select at least one region.",
                 show_alert=True
             )
             return
@@ -1351,18 +1351,18 @@ def callback_handler(call):
         set_daily_region_override(target_user_id, regions)
         pop_limit_region_selection(user_id, session_id)
 
-        regions_text = "، ".join(regions)
+        regions_text = ", ".join(regions)
         notification_sent = send_limit_notification(
             target_user_id,
-            "🔓 دسترسی موقت دانلود برای شما فعال شد.\n\n"
-            f"تا پایان امروز می‌توانید از این مناطق دانلود کنید:\n{regions_text}\n\n"
-            "در پایان امروز، محدودیت عادی شما دوباره فعال می‌شود."
+            "🔓 Temporary download access has been enabled for your account.\n\n"
+            f"You may download from these regions through the end of today:\n{regions_text}\n\n"
+            "Your standard limits will return at the end of today."
         )
-        warning = "" if notification_sent else "\n⚠️ ارسال پیام به کاربر ممکن نبود."
-        safe_answer_callback_query(bot, call.id, "انتخاب مناطق ثبت شد ✅")
+        warning = "" if notification_sent else "\n⚠️ The notification could not be sent to the user."
+        safe_answer_callback_query(bot, call.id, "Region selection saved ✅")
         safe_edit_message_text(
             bot,
-            f"✅ دسترسی مناطق برای کاربر {target_user_id} تا پایان امروز ثبت شد:\n"
+            f"✅ Regional access was enabled for user {target_user_id} through the end of today:\n"
             f"{regions_text}{warning}",
             chat_id,
             message_id
@@ -1380,7 +1380,7 @@ def callback_handler(call):
     # ---------- Admin download-limit exemptions ----------
     if call.data == "admin_exemptions":
         if not is_main_admin(user_id):
-            safe_answer_callback_query(bot, call.id, "دسترسی غیرمجاز", show_alert=True)
+            safe_answer_callback_query(bot, call.id, "Unauthorized access", show_alert=True)
             return
         safe_edit_message_text(
             bot,
@@ -1393,32 +1393,32 @@ def callback_handler(call):
 
     if call.data == "exemption_add_help":
         if not is_main_admin(user_id):
-            safe_answer_callback_query(bot, call.id, "دسترسی غیرمجاز", show_alert=True)
+            safe_answer_callback_query(bot, call.id, "Unauthorized access", show_alert=True)
             return
-        safe_answer_callback_query(bot, call.id, "راهنمای دستور ارسال شد.")
+        safe_answer_callback_query(bot, call.id, "Instructions sent.")
         bot.send_message(chat_id, _limit_add_help())
         return
 
     if call.data.startswith("exemption_remove|"):
         if not is_main_admin(user_id):
-            safe_answer_callback_query(bot, call.id, "دسترسی غیرمجاز", show_alert=True)
+            safe_answer_callback_query(bot, call.id, "Unauthorized access", show_alert=True)
             return
         try:
             target_user_id = int(call.data.split("|", 1)[1])
         except ValueError:
-            safe_answer_callback_query(bot, call.id, "شناسه نامعتبر است.", show_alert=True)
+            safe_answer_callback_query(bot, call.id, "Invalid user ID.", show_alert=True)
             return
         removed = remove_download_limit_override(target_user_id)
         notification_sent = True
         if removed:
             notification_sent = send_limit_notification(
                 target_user_id,
-                "🔒 دسترسی ویژه دانلود شما توسط مدیر پایان یافت.\n"
-                "محدودیت عادی روزانه و ماهانه دوباره فعال شد."
+                "🔒 Your special download access was ended by an administrator.\n"
+                "Your standard daily and monthly limits are active again."
             )
-        result_text = "محدودیت کاربر دوباره فعال شد." if removed else "کاربر در فهرست نبود."
+        result_text = "The user's standard limits are active again." if removed else "The user was not in the list."
         if removed and not notification_sent:
-            result_text += " ارسال پیام به کاربر ممکن نبود."
+            result_text += " The notification could not be sent to the user."
         safe_answer_callback_query(
             bot,
             call.id,
@@ -1485,7 +1485,7 @@ def callback_handler(call):
             safe_answer_callback_query(
                 bot,
                 call.id,
-                "❌ این شهرستان در دسترسی موقت امروز شما نیست.",
+                "❌ This region is not included in your temporary access today.",
                 show_alert=True
             )
             return
@@ -1525,7 +1525,7 @@ def callback_handler(call):
                 safe_answer_callback_query(
                     bot,
                     call.id,
-                    denial_message or "❌ امکان دانلود برای شما وجود ندارد.",
+                    denial_message or "❌ Downloads are not currently available for your account.",
                     show_alert=True
                 )
                 answered = True
