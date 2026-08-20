@@ -136,6 +136,28 @@ class DownloadLimitTests(unittest.TestCase):
         self.assertEqual(resolved, ["تهران", "قم", "البرز"])
         self.assertEqual(invalid, [])
 
+    def test_admin_can_select_multiple_regions_with_buttons(self):
+        admin_user_id = int(os.environ["ADMIN_ID"])
+        session_id, markup = self.app.start_limit_region_selection(admin_user_id, 108)
+
+        region_buttons = [
+            button
+            for row in markup.keyboard
+            for button in row
+            if button.callback_data and button.callback_data.startswith("lrs|")
+        ]
+        self.assertEqual(len(region_buttons), len(self.app.REGIONS))
+
+        selected = self.app.toggle_limit_region_selection(
+            admin_user_id,
+            session_id,
+            "تهران"
+        )
+        self.assertEqual(selected, {"تهران"})
+        state = self.app.pop_limit_region_selection(admin_user_id, session_id)
+        self.assertEqual(state["target_user_id"], 108)
+        self.assertEqual(state["selected_regions"], {"تهران"})
+
     def test_remove_clears_any_managed_mode(self):
         user_id = 104
         self.app.set_daily_region_override(user_id, ["تهران"])

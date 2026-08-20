@@ -6,6 +6,7 @@ import sqlite3
 import io
 import json
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import telebot
@@ -358,6 +359,8 @@ def require_membership(message_or_call) -> bool:
 _LAST_CALLBACK: dict[tuple[int, int], tuple[str, float]] = {}
 _USER_DOWNLOAD_LOCKS: dict[int, threading.Lock] = {}
 _USER_DOWNLOAD_LOCKS_GUARD = threading.Lock()
+_LIMIT_REGION_SELECTIONS: dict[int, dict] = {}
+_LIMIT_REGION_SELECTIONS_LOCK = threading.Lock()
 
 def is_debounced(chat_id: int, message_id: int, callback_data: str) -> bool:
     key = (chat_id, message_id)
@@ -692,6 +695,103 @@ def _add_admin_button(markup: InlineKeyboardMarkup, user_id: int) -> InlineKeybo
         )
     return markup
 
+def build_limit_region_selection_markup(
+    session_id: str,
+    selected_regions: set[str],
+    page: int = 0,
+) -> InlineKeyboardMarkup:
+    """Build the admin's multi-select region keyboard for /limit_add."""
+    markup = InlineKeyboardMarkup()
+    start = page * PAGE_SIZE
+    end = min(start + PAGE_SIZE, len(REGIONS))
+
+    row = []
+    for region_index in range(start, end):
+        region = REGIONS[region_index]
+        prefix = "✅" if region in selected_regions else "▫️"
+        row.append(
+            InlineKeyboardButton(
+                f"{prefix} {region}",
+                callback_data=f"lrs|{session_id}|{region_index}|{page}"
+            )
+        )
+        if len(row) == BUTTONS_PER_ROW:
+            markup.row(*row)
+            row = []
+    if row:
+        markup.row(*row)
+
+    total_pages = max(1, math.ceil(len(REGIONS) / PAGE_SIZE))
+    navigation = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton("⬅️ قبلی", callback_data=f"lrp|{session_id}|{page - 1}")
+        )
+    if page < total_pages - 1:
+        navigation.append(
+            InlineKeyboardButton("بعدی ➡️", callback_data=f"lrp|{session_id}|{page + 1}")
+        )
+    if navigation:
+        markup.row(*navigation)
+
+    markup.row(
+        InlineKeyboardButton(
+            f"✅ ثبت انتخاب‌ها ({len(selected_regions)})",
+            callback_data=f"lrd|{session_id}"
+        ),
+        InlineKeyboardButton("❌ لغو", callback_data=f"lrc|{session_id}")
+    )
+    return markup
+
+def start_limit_region_selection(admin_user_id: int, target_user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    session_id = secrets.token_hex(4)
+    with _LIMIT_REGION_SELECTIONS_LOCK:
+        _LIMIT_REGION_SELECTIONS[admin_user_id] = {
+            "session_id": session_id,
+            "target_user_id": target_user_id,
+            "selected_regions": set(),
+        }
+    return session_id, build_limit_region_selection_markup(session_id, set())
+
+def get_limit_region_selection(admin_user_id: int, session_id: str) -> dict | None:
+    with _LIMIT_REGION_SELECTIONS_LOCK:
+        state = _LIMIT_REGION_SELECTIONS.get(admin_user_id)
+        if not state or state["session_id"] != session_id:
+            return None
+        return {
+            "session_id": state["session_id"],
+            "target_user_id": state["target_user_id"],
+            "selected_regions": set(state["selected_regions"]),
+        }
+
+def toggle_limit_region_selection(
+    admin_user_id: int,
+    session_id: str,
+    region: str,
+) -> set[str] | None:
+    with _LIMIT_REGION_SELECTIONS_LOCK:
+        state = _LIMIT_REGION_SELECTIONS.get(admin_user_id)
+        if not state or state["session_id"] != session_id:
+            return None
+        selected = state["selected_regions"]
+        if region in selected:
+            selected.remove(region)
+        else:
+            selected.add(region)
+        return set(selected)
+
+def pop_limit_region_selection(admin_user_id: int, session_id: str) -> dict | None:
+    with _LIMIT_REGION_SELECTIONS_LOCK:
+        state = _LIMIT_REGION_SELECTIONS.get(admin_user_id)
+        if not state or state["session_id"] != session_id:
+            return None
+        removed = _LIMIT_REGION_SELECTIONS.pop(admin_user_id)
+        return {
+            "session_id": removed["session_id"],
+            "target_user_id": removed["target_user_id"],
+            "selected_regions": set(removed["selected_regions"]),
+        }
+
 def build_exemptions_markup() -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup()
     permanent_rows = _db_fetchall("""
@@ -759,7 +859,7 @@ def exemptions_text() -> str:
         f"{listing}\n\n"
         "۱) دائمی: /limit_add user_id\n"
         "۲) سهمیه امروز: /limit_add user_id daily تعداد\n"
-        "۳) مناطق امروز: /limit_add user_id regions نام۱، نام۲\n"
+        "۳) انتخاب مناطق امروز: /limit_add user_id regions\n"
         "حذف: /limit_remove user_id\n"
         "نمایش فهرست: /limit_list\n\n"
         "برای حذف سریع، روی دکمه همان کاربر بزنید."
@@ -929,10 +1029,12 @@ def _limit_add_help() -> str:
         "۲) سهمیه تعداد ایستگاه فقط برای امروز:\n"
         "/limit_add user_id daily تعداد\n"
         "مثال: /limit_add 244146213 daily 5\n\n"
-        "۳) دسترسی نامحدود امروز، فقط برای شهرستان‌ها/مناطق مشخص:\n"
+        "۳) دسترسی امروز برای مناطق انتخابی:\n"
+        "/limit_add user_id regions\n"
+        "بعد از ارسال دستور، مناطق را با دکمه انتخاب و ثبت کنید.\n\n"
+        "روش متنی نیز پشتیبانی می‌شود:\n"
         "/limit_add user_id regions نام۱، نام۲\n"
         "مثال: /limit_add 244146213 regions Khorasan Razavi, North Khorasan\n\n"
-        "نام مناطق را دقیقاً مطابق دکمه‌های ربات وارد کنید. "
         "حالت‌های موقت در پایان امروز به وقت ایران خودکار غیرفعال می‌شوند."
     )
 
@@ -1024,6 +1126,18 @@ def limit_add(message):
         return
 
     if mode in {"3", "regions", "region", "counties", "county", "شهرستان", "شهرستانها", "شهرستان‌ها"}:
+        if len(parts) == 3:
+            if not REGIONS:
+                bot.reply_to(message, "❌ فهرست مناطق در حال حاضر در دسترس نیست.")
+                return
+            _, markup = start_limit_region_selection(message.from_user.id, target_user_id)
+            bot.reply_to(
+                message,
+                f"📍 مناطق مجاز امروز برای کاربر {target_user_id} را انتخاب کنید.\n"
+                "می‌توانید چند مورد را تیک بزنید و سپس «ثبت انتخاب‌ها» را بزنید.",
+                reply_markup=markup
+            )
+            return
         if len(parts) != 4:
             bot.reply_to(message, "❌ نام شهرستان‌ها مشخص نشده است.\n\n" + _limit_add_help())
             return
@@ -1151,6 +1265,108 @@ def callback_handler(call):
         return
 
     if not require_membership(call):
+        return
+
+    # ---------- Interactive region selection for /limit_add ----------
+    if call.data.startswith(("lrs|", "lrp|", "lrd|", "lrc|")):
+        if not is_main_admin(user_id):
+            safe_answer_callback_query(bot, call.id, "دسترسی غیرمجاز", show_alert=True)
+            return
+
+        callback_parts = call.data.split("|")
+        session_id = callback_parts[1] if len(callback_parts) >= 2 else ""
+        state = get_limit_region_selection(user_id, session_id)
+        if state is None:
+            safe_answer_callback_query(
+                bot,
+                call.id,
+                "این انتخاب منقضی شده است؛ دستور /limit_add را دوباره ارسال کنید.",
+                show_alert=True
+            )
+            return
+
+        if call.data.startswith("lrs|"):
+            try:
+                region_index = int(callback_parts[2])
+                page = int(callback_parts[3])
+                region = REGIONS[region_index]
+            except (IndexError, ValueError):
+                safe_answer_callback_query(bot, call.id, "انتخاب نامعتبر است.", show_alert=True)
+                return
+            selected = toggle_limit_region_selection(user_id, session_id, region)
+            if selected is None:
+                safe_answer_callback_query(bot, call.id, "این انتخاب منقضی شده است.", show_alert=True)
+                return
+            safe_answer_callback_query(bot, call.id)
+            safe_edit_message_reply_markup(
+                bot,
+                chat_id,
+                message_id,
+                reply_markup=build_limit_region_selection_markup(session_id, selected, page)
+            )
+            return
+
+        if call.data.startswith("lrp|"):
+            try:
+                page = int(callback_parts[2])
+            except (IndexError, ValueError):
+                safe_answer_callback_query(bot, call.id, "صفحه نامعتبر است.", show_alert=True)
+                return
+            safe_answer_callback_query(bot, call.id)
+            safe_edit_message_reply_markup(
+                bot,
+                chat_id,
+                message_id,
+                reply_markup=build_limit_region_selection_markup(
+                    session_id,
+                    state["selected_regions"],
+                    page
+                )
+            )
+            return
+
+        if call.data.startswith("lrc|"):
+            pop_limit_region_selection(user_id, session_id)
+            safe_answer_callback_query(bot, call.id, "انتخاب مناطق لغو شد.")
+            safe_edit_message_text(
+                bot,
+                "❌ انتخاب مناطق لغو شد.",
+                chat_id,
+                message_id
+            )
+            return
+
+        selected_regions = state["selected_regions"]
+        if not selected_regions:
+            safe_answer_callback_query(
+                bot,
+                call.id,
+                "حداقل یک منطقه را انتخاب کنید.",
+                show_alert=True
+            )
+            return
+
+        target_user_id = state["target_user_id"]
+        regions = [region for region in REGIONS if region in selected_regions]
+        set_daily_region_override(target_user_id, regions)
+        pop_limit_region_selection(user_id, session_id)
+
+        regions_text = "، ".join(regions)
+        notification_sent = send_limit_notification(
+            target_user_id,
+            "🔓 دسترسی موقت دانلود برای شما فعال شد.\n\n"
+            f"تا پایان امروز می‌توانید از این مناطق دانلود کنید:\n{regions_text}\n\n"
+            "در پایان امروز، محدودیت عادی شما دوباره فعال می‌شود."
+        )
+        warning = "" if notification_sent else "\n⚠️ ارسال پیام به کاربر ممکن نبود."
+        safe_answer_callback_query(bot, call.id, "انتخاب مناطق ثبت شد ✅")
+        safe_edit_message_text(
+            bot,
+            f"✅ دسترسی مناطق برای کاربر {target_user_id} تا پایان امروز ثبت شد:\n"
+            f"{regions_text}{warning}",
+            chat_id,
+            message_id
+        )
         return
 
     # ---------- Admin report ----------
