@@ -4,6 +4,9 @@ import time
 import threading
 import sqlite3
 import io
+import json
+import re
+from datetime import datetime, timedelta, timezone
 
 import telebot
 from telebot.apihelper import ApiTelegramException
@@ -20,6 +23,11 @@ ADMIN_ID = os.environ.get("ADMIN_ID")  # env vars are strings
 PARQUET_FILE = os.environ.get("DATA_PATH", "Iran_Data.parquet")
 PDF_GUIDE_FILE = os.environ.get("GUIDE_PATH", "Help.pdf")
 DB_PATH = os.environ.get("DB_PATH", "users.db")
+
+# Iran has used UTC+03:30 year-round since 2022.  Keeping the business date
+# explicit prevents a server configured in another timezone from expiring a
+# one-day override too early or too late.
+IRAN_TIMEZONE = timezone(timedelta(hours=3, minutes=30))
 
 BUTTONS_PER_ROW = 2
 PAGE_SIZE = 16
@@ -67,6 +75,22 @@ with DB_LOCK:
         added_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     )
     """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS daily_download_overrides (
+        user_id INTEGER PRIMARY KEY,
+        override_date TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('station_limit', 'regions')),
+        station_limit INTEGER,
+        allowed_regions TEXT,
+        added_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+        completion_notified_at TEXT,
+        CHECK (
+            (mode = 'station_limit' AND station_limit > 0 AND allowed_regions IS NULL)
+            OR
+            (mode = 'regions' AND station_limit IS NULL AND allowed_regions IS NOT NULL)
+        )
+    )
+    """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_downloads_user_date ON downloads(user_id, download_date)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_downloads_date ON downloads(download_date)")
     conn.commit()
@@ -98,6 +122,21 @@ def _ensure_users_table_schema() -> None:
 
 _ensure_users_table_schema()
 
+def _ensure_daily_overrides_table_schema() -> None:
+    """Add notification state when upgrading an existing bot database."""
+    with DB_LOCK:
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(daily_download_overrides)")
+        existing_columns = {row[1] for row in c.fetchall()}
+        if "completion_notified_at" not in existing_columns:
+            c.execute(
+                "ALTER TABLE daily_download_overrides "
+                "ADD COLUMN completion_notified_at TEXT"
+            )
+        conn.commit()
+
+_ensure_daily_overrides_table_schema()
+
 def _db_fetchone(sql: str, params=()):
     with DB_LOCK:
         c = conn.cursor()
@@ -115,6 +154,10 @@ def _db_execute(sql: str, params=()):
         c = conn.cursor()
         c.execute(sql, params)
         conn.commit()
+
+def _today() -> str:
+    """Return the current calendar date in Iran."""
+    return datetime.now(IRAN_TIMEZONE).date().isoformat()
 
 # ---------- LOAD DATA (Polars LazyFrame) ----------
 df = pl.scan_parquet(PARQUET_FILE)
@@ -313,6 +356,8 @@ def require_membership(message_or_call) -> bool:
 # ---------- RATE LIMIT HELPERS ----------
 # For each (chat_id, message_id) remember last callback_data + timestamp
 _LAST_CALLBACK: dict[tuple[int, int], tuple[str, float]] = {}
+_USER_DOWNLOAD_LOCKS: dict[int, threading.Lock] = {}
+_USER_DOWNLOAD_LOCKS_GUARD = threading.Lock()
 
 def is_debounced(chat_id: int, message_id: int, callback_data: str) -> bool:
     key = (chat_id, message_id)
@@ -323,14 +368,21 @@ def is_debounced(chat_id: int, message_id: int, callback_data: str) -> bool:
     _LAST_CALLBACK[key] = (callback_data, now)
     return False
 
+def get_user_download_lock(user_id: int) -> threading.Lock:
+    """Serialize checks/download logging for one user to prevent quota races."""
+    with _USER_DOWNLOAD_LOCKS_GUARD:
+        return _USER_DOWNLOAD_LOCKS.setdefault(user_id, threading.Lock())
+
 # ---------- HELPER FUNCTIONS ----------
 STATIC_EXCLUDE_IDS = {str(ADMIN_ID), "107479525"}
+NORMAL_DAILY_LIMIT = 1
+NORMAL_MONTHLY_LIMIT = 10
 
 def is_main_admin(user_id: int) -> bool:
     return str(user_id) == str(ADMIN_ID)
 
 def is_download_limit_exempt(user_id: int) -> bool:
-    """Return True for permanent or admin-managed download-limit exemptions."""
+    """Return True only for permanent/static download-limit exemptions."""
     if str(user_id) in STATIC_EXCLUDE_IDS:
         return True
     row = _db_fetchone(
@@ -340,7 +392,7 @@ def is_download_limit_exempt(user_id: int) -> bool:
     return row is not None
 
 def add_download_limit_exemption(user_id: int) -> bool:
-    """Add an exemption and return True only when a new row was created."""
+    """Make a user permanently exempt, replacing any one-day override."""
     with DB_LOCK:
         c = conn.cursor()
         c.execute(
@@ -348,45 +400,206 @@ def add_download_limit_exemption(user_id: int) -> bool:
             (user_id,)
         )
         created = c.rowcount > 0
+        c.execute("DELETE FROM daily_download_overrides WHERE user_id=?", (user_id,))
         conn.commit()
         return created
 
-def remove_download_limit_exemption(user_id: int) -> bool:
-    """Remove a managed exemption and return True when it existed."""
+def set_daily_station_limit(user_id: int, station_limit: int) -> None:
+    """Allow up to ``station_limit`` downloads today, ignoring normal limits."""
     with DB_LOCK:
         c = conn.cursor()
+        c.execute("DELETE FROM download_limit_exemptions WHERE user_id=?", (user_id,))
         c.execute(
-            "DELETE FROM download_limit_exemptions WHERE user_id=?",
-            (user_id,)
+            """
+            INSERT INTO daily_download_overrides(
+                user_id, override_date, mode, station_limit, allowed_regions, added_at
+            ) VALUES (?, ?, 'station_limit', ?, NULL, datetime('now', 'localtime'))
+            ON CONFLICT(user_id) DO UPDATE SET
+                override_date=excluded.override_date,
+                mode=excluded.mode,
+                station_limit=excluded.station_limit,
+                allowed_regions=NULL,
+                added_at=excluded.added_at,
+                completion_notified_at=NULL
+            """,
+            (user_id, _today(), station_limit)
         )
-        removed = c.rowcount > 0
         conn.commit()
-        return removed
 
-def can_download_daily(user_id: int) -> bool:
-    if is_download_limit_exempt(user_id):
-        return True
-    today = time.strftime("%Y-%m-%d")
-    row = _db_fetchone("SELECT 1 FROM downloads WHERE user_id=? AND download_date=? LIMIT 1", (user_id, today))
-    return row is None
+def set_daily_region_override(user_id: int, regions: list[str]) -> None:
+    """Allow unlimited downloads today, but only from the supplied regions."""
+    encoded_regions = json.dumps(regions, ensure_ascii=False)
+    with DB_LOCK:
+        c = conn.cursor()
+        c.execute("DELETE FROM download_limit_exemptions WHERE user_id=?", (user_id,))
+        c.execute(
+            """
+            INSERT INTO daily_download_overrides(
+                user_id, override_date, mode, station_limit, allowed_regions, added_at
+            ) VALUES (?, ?, 'regions', NULL, ?, datetime('now', 'localtime'))
+            ON CONFLICT(user_id) DO UPDATE SET
+                override_date=excluded.override_date,
+                mode=excluded.mode,
+                station_limit=NULL,
+                allowed_regions=excluded.allowed_regions,
+                added_at=excluded.added_at,
+                completion_notified_at=NULL
+            """,
+            (user_id, _today(), encoded_regions)
+        )
+        conn.commit()
 
-def can_download_monthly(user_id: int) -> bool:
-    if is_download_limit_exempt(user_id):
-        return True
-    today = time.strftime("%Y-%m-%d")
-    month_start = today[:8] + "01"
+def remove_download_limit_override(user_id: int) -> bool:
+    """Remove either managed permanent or one-day override for a user."""
+    with DB_LOCK:
+        c = conn.cursor()
+        c.execute("DELETE FROM download_limit_exemptions WHERE user_id=?", (user_id,))
+        removed = c.rowcount
+        c.execute("DELETE FROM daily_download_overrides WHERE user_id=?", (user_id,))
+        removed += c.rowcount
+        conn.commit()
+        return removed > 0
+
+def get_active_daily_override(user_id: int) -> dict | None:
     row = _db_fetchone(
-        "SELECT COUNT(*) FROM downloads WHERE user_id=? AND download_date >= ?",
-        (user_id, month_start)
+        """
+        SELECT mode, station_limit, allowed_regions
+        FROM daily_download_overrides
+        WHERE user_id=? AND override_date=? AND completion_notified_at IS NULL
+        """,
+        (user_id, _today())
     )
-    count = row[0] if row else 0
-    return count < 10
+    if not row:
+        return None
+
+    mode, station_limit, allowed_regions = row
+    if mode == "station_limit":
+        return {"mode": mode, "station_limit": int(station_limit)}
+
+    try:
+        regions = json.loads(allowed_regions)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(regions, list):
+        return None
+    return {"mode": mode, "regions": [str(region) for region in regions]}
+
+def _download_counts(user_id: int) -> tuple[int, int]:
+    today = _today()
+    month_start = today[:8] + "01"
+    daily_row = _db_fetchone(
+        "SELECT COUNT(*) FROM downloads WHERE user_id=? AND download_date=?",
+        (user_id, today)
+    )
+    monthly_row = _db_fetchone(
+        """
+        SELECT COUNT(*) FROM downloads
+        WHERE user_id=? AND download_date BETWEEN ? AND ?
+        """,
+        (user_id, month_start, today)
+    )
+    return (
+        int(daily_row[0]) if daily_row else 0,
+        int(monthly_row[0]) if monthly_row else 0,
+    )
+
+def check_download_access(user_id: int, region: str) -> tuple[bool, str | None]:
+    """Evaluate the user's active policy for one station download."""
+    if is_download_limit_exempt(user_id):
+        return True, None
+
+    daily_override = get_active_daily_override(user_id)
+    if daily_override:
+        if daily_override["mode"] == "station_limit":
+            daily_used, _ = _download_counts(user_id)
+            if daily_used < daily_override["station_limit"]:
+                return True, None
+            return False, "❌ سهمیه دانلود امروز شما به پایان رسیده است."
+
+        if region in daily_override["regions"]:
+            return True, None
+        allowed = "، ".join(daily_override["regions"])
+        return False, f"❌ امروز فقط دانلود از این شهرستان‌ها مجاز است:\n{allowed}"
+
+    daily_used, monthly_used = _download_counts(user_id)
+    if daily_used >= NORMAL_DAILY_LIMIT:
+        return False, "❌ سهمیه روزانه شما (۱ ایستگاه) به پایان رسیده است."
+    if monthly_used >= NORMAL_MONTHLY_LIMIT:
+        return False, "❌ سهمیه ماهانه شما (۱۰ ایستگاه) به پایان رسیده است."
+    return True, None
+
+def send_limit_notification(user_id: int, text: str) -> bool:
+    """Send a policy notification, returning False when the user is unreachable."""
+    try:
+        bot.send_message(user_id, text)
+        return True
+    except Exception as exc:
+        print(f"Could not send limit notification to {user_id}: {exc}")
+        return False
+
+def process_completed_override_notifications(user_id: int | None = None) -> int:
+    """Notify users whose one-day access expired or whose quota was consumed."""
+    sql = """
+        SELECT user_id, override_date, mode, station_limit, allowed_regions
+        FROM daily_download_overrides
+        WHERE completion_notified_at IS NULL
+    """
+    params: tuple = ()
+    if user_id is not None:
+        sql += " AND user_id=?"
+        params = (user_id,)
+
+    today = _today()
+    notified = 0
+    for uid, override_date, mode, station_limit, _ in _db_fetchall(sql, params):
+        message_text: str | None = None
+        if override_date < today:
+            message_text = (
+                "⏰ دسترسی موقت دانلود شما به پایان رسید.\n\n"
+                "🔒 محدودیت عادی شما دوباره فعال شد:\n"
+                f"• روزانه {NORMAL_DAILY_LIMIT} ایستگاه\n"
+                f"• ماهانه {NORMAL_MONTHLY_LIMIT} ایستگاه"
+            )
+        elif override_date == today and mode == "station_limit":
+            daily_used, _ = _download_counts(uid)
+            if daily_used >= int(station_limit):
+                message_text = (
+                    f"✅ سهمیه موقت {station_limit} ایستگاه امروز شما کامل مصرف شد.\n\n"
+                    "🔒 محدودیت عادی شما دوباره فعال شد:\n"
+                    f"• روزانه {NORMAL_DAILY_LIMIT} ایستگاه\n"
+                    f"• ماهانه {NORMAL_MONTHLY_LIMIT} ایستگاه"
+                )
+
+        if message_text is None or not send_limit_notification(uid, message_text):
+            continue
+
+        _db_execute(
+            """
+            UPDATE daily_download_overrides
+            SET completion_notified_at=?
+            WHERE user_id=? AND override_date=? AND completion_notified_at IS NULL
+            """,
+            (datetime.now(IRAN_TIMEZONE).isoformat(timespec="seconds"), uid, override_date)
+        )
+        notified += 1
+
+    return notified
+
+_NOTIFICATION_STOP_EVENT = threading.Event()
+
+def run_limit_notification_worker() -> None:
+    """Check durable one-day policies periodically, including after restarts."""
+    while not _NOTIFICATION_STOP_EVENT.is_set():
+        try:
+            process_completed_override_notifications()
+        except Exception as exc:
+            print(f"[Limit Notification Error] {exc}")
+        _NOTIFICATION_STOP_EVENT.wait(30)
 
 def log_download(user_id: int, username: str, station_name: str) -> None:
-    today = time.strftime("%Y-%m-%d")
     _db_execute(
         "INSERT INTO downloads(user_id, username, station_name, download_date) VALUES (?, ?, ?, ?)",
-        (user_id, username, station_name, today)
+        (user_id, username, station_name, _today())
     )
 
 def get_stations_for(region: str) -> list[str]:
@@ -426,7 +639,13 @@ def build_keyboard(options: list[str], callback_prefix: str, page: int = 0) -> I
 # ---------- MAIN MENU (Province list + utilities) ----------
 def build_region_menu(user_id: int, page: int = 0) -> InlineKeyboardMarkup:
     """Province selection keyboard plus utility buttons (e.g., download limit)."""
-    markup = build_keyboard(REGIONS, "region", page)
+    visible_regions = REGIONS
+    daily_override = get_active_daily_override(user_id)
+    if daily_override and daily_override["mode"] == "regions":
+        allowed = set(daily_override["regions"])
+        visible_regions = [region for region in REGIONS if region in allowed]
+
+    markup = build_keyboard(visible_regions, "region", page)
     # Utility button that used to exist before optimizations
     markup.row(
         InlineKeyboardButton("📊 Check download limit", callback_data="check_download_limit")
@@ -434,27 +653,36 @@ def build_region_menu(user_id: int, page: int = 0) -> InlineKeyboardMarkup:
     markup = _add_admin_button(markup, user_id)
     return markup
 
-def get_download_usage(user_id: int) -> tuple[int, int, int, int]:
-    """Return (daily_used, daily_limit, monthly_used, monthly_limit)."""
-    # Excluded IDs effectively have no limits
+def download_limit_status_text(user_id: int) -> str:
     if is_download_limit_exempt(user_id):
-        return (0, 10**9, 0, 10**9)
+        return "✅ حساب شما محدودیت دانلود ندارد."
 
-    today = time.strftime("%Y-%m-%d")
-    month_start = today[:8] + "01"
+    daily_used, monthly_used = _download_counts(user_id)
+    daily_override = get_active_daily_override(user_id)
+    if daily_override and daily_override["mode"] == "station_limit":
+        daily_limit = daily_override["station_limit"]
+        return (
+            "📊 سهمیه موقت امروز\n\n"
+            f"• دانلود امروز: {daily_used}/{daily_limit}\n"
+            f"• باقی‌مانده: {max(0, daily_limit - daily_used)}\n"
+            "• پایان اعتبار: پایان امروز به وقت ایران"
+        )
+    if daily_override and daily_override["mode"] == "regions":
+        allowed = "، ".join(daily_override["regions"])
+        return (
+            "📍 دسترسی موقت شهرستانی امروز\n\n"
+            f"• شهرستان‌های مجاز: {allowed}\n"
+            f"• دانلود امروز: {daily_used}\n"
+            "• پایان اعتبار: پایان امروز به وقت ایران"
+        )
 
-    daily_used = 1 if _db_fetchone(
-        "SELECT 1 FROM downloads WHERE user_id=? AND download_date=? LIMIT 1",
-        (user_id, today)
-    ) else 0
-
-    row = _db_fetchone(
-        "SELECT COUNT(*) FROM downloads WHERE user_id=? AND download_date >= ?",
-        (user_id, month_start)
+    return (
+        "📊 محدودیت دانلود\n\n"
+        f"• امروز: {daily_used}/{NORMAL_DAILY_LIMIT} "
+        f"(باقی‌مانده: {max(0, NORMAL_DAILY_LIMIT - daily_used)})\n"
+        f"• این ماه: {monthly_used}/{NORMAL_MONTHLY_LIMIT} "
+        f"(باقی‌مانده: {max(0, NORMAL_MONTHLY_LIMIT - monthly_used)})"
     )
-    monthly_used = int(row[0]) if row else 0
-
-    return (daily_used, 1, monthly_used, 10)
 
 def _add_admin_button(markup: InlineKeyboardMarkup, user_id: int) -> InlineKeyboardMarkup:
     if is_main_admin(user_id):
@@ -466,37 +694,72 @@ def _add_admin_button(markup: InlineKeyboardMarkup, user_id: int) -> InlineKeybo
 
 def build_exemptions_markup() -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup()
-    rows = _db_fetchall("""
+    permanent_rows = _db_fetchall("""
         SELECT e.user_id, u.username, u.first_name
         FROM download_limit_exemptions AS e
         LEFT JOIN users AS u ON u.user_id = e.user_id
         ORDER BY e.added_at, e.user_id
     """)
-    for uid, username, first_name in rows:
-        label = f"❌ {username or first_name or uid} ({uid})"
+    daily_rows = _db_fetchall("""
+        SELECT o.user_id, u.username, u.first_name, o.mode
+        FROM daily_download_overrides AS o
+        LEFT JOIN users AS u ON u.user_id = o.user_id
+        WHERE o.override_date=? AND o.completion_notified_at IS NULL
+        ORDER BY o.added_at, o.user_id
+    """, (_today(),))
+    for uid, username, first_name in permanent_rows:
+        label = f"❌ دائمی | {username or first_name or uid} ({uid})"
+        markup.add(InlineKeyboardButton(label, callback_data=f"exemption_remove|{uid}"))
+    for uid, username, first_name, mode in daily_rows:
+        mode_label = "سهمیه امروز" if mode == "station_limit" else "شهرستان امروز"
+        label = f"❌ {mode_label} | {username or first_name or uid} ({uid})"
         markup.add(InlineKeyboardButton(label, callback_data=f"exemption_remove|{uid}"))
     markup.add(InlineKeyboardButton("➕ راهنمای افزودن", callback_data="exemption_add_help"))
     markup.add(InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_provinces"))
     return markup
 
 def exemptions_text() -> str:
-    rows = _db_fetchall("""
+    permanent_rows = _db_fetchall("""
         SELECT e.user_id, u.username, u.first_name
         FROM download_limit_exemptions AS e
         LEFT JOIN users AS u ON u.user_id = e.user_id
         ORDER BY e.added_at, e.user_id
     """)
-    if not rows:
+    daily_rows = _db_fetchall("""
+        SELECT o.user_id, u.username, u.first_name,
+               o.mode, o.station_limit, o.allowed_regions
+        FROM daily_download_overrides AS o
+        LEFT JOIN users AS u ON u.user_id = o.user_id
+        WHERE o.override_date=? AND o.completion_notified_at IS NULL
+        ORDER BY o.added_at, o.user_id
+    """, (_today(),))
+
+    lines = [
+        f"• {uid} — {username or first_name or 'نامشخص'} — بدون محدودیت دائمی"
+        for uid, username, first_name in permanent_rows
+    ]
+    for uid, username, first_name, mode, station_limit, encoded_regions in daily_rows:
+        name = username or first_name or "نامشخص"
+        if mode == "station_limit":
+            description = f"امروز تا {station_limit} ایستگاه"
+        else:
+            try:
+                regions = json.loads(encoded_regions)
+            except (TypeError, json.JSONDecodeError):
+                regions = []
+            description = "امروز فقط: " + "، ".join(regions)
+        lines.append(f"• {uid} — {name} — {description}")
+
+    if not lines:
         listing = "فعلاً هیچ کاربری در فهرست قابل‌مدیریت نیست."
     else:
-        listing = "\n".join(
-            f"• {uid} — {username or first_name or 'نامشخص'}"
-            for uid, username, first_name in rows
-        )
+        listing = "\n".join(lines)
     return (
-        "🔓 کاربران بدون محدودیت دانلود\n\n"
+        "🔓 مدیریت محدودیت دانلود\n\n"
         f"{listing}\n\n"
-        "افزودن: /limit_add user_id\n"
+        "۱) دائمی: /limit_add user_id\n"
+        "۲) سهمیه امروز: /limit_add user_id daily تعداد\n"
+        "۳) مناطق امروز: /limit_add user_id regions نام۱، نام۲\n"
         "حذف: /limit_remove user_id\n"
         "نمایش فهرست: /limit_list\n\n"
         "برای حذف سریع، روی دکمه همان کاربر بزنید."
@@ -570,8 +833,8 @@ def report_command(message):
     rows = _db_fetchall("""
         SELECT user_id, username, station_name, download_date
         FROM downloads
-        WHERE download_date = date('now', 'localtime')
-    """)
+        WHERE download_date = ?
+    """, (_today(),))
 
     if not rows:
         bot.send_message(message.chat.id, "📭 No downloads recorded today.")
@@ -657,21 +920,142 @@ def _parse_positive_user_id(message, command_name: str) -> int | None:
         bot.reply_to(message, "❌ user_id باید یک عدد صحیح مثبت باشد.")
         return None
 
+def _limit_add_help() -> str:
+    return (
+        "فرمت‌های دستور /limit_add:\n\n"
+        "۱) حذف دائمی همه محدودیت‌ها:\n"
+        "/limit_add user_id\n"
+        "/limit_add user_id permanent\n\n"
+        "۲) سهمیه تعداد ایستگاه فقط برای امروز:\n"
+        "/limit_add user_id daily تعداد\n"
+        "مثال: /limit_add 244146213 daily 5\n\n"
+        "۳) دسترسی نامحدود امروز، فقط برای شهرستان‌ها/مناطق مشخص:\n"
+        "/limit_add user_id regions نام۱، نام۲\n"
+        "مثال: /limit_add 244146213 regions Khorasan Razavi, North Khorasan\n\n"
+        "نام مناطق را دقیقاً مطابق دکمه‌های ربات وارد کنید. "
+        "حالت‌های موقت در پایان امروز به وقت ایران خودکار غیرفعال می‌شوند."
+    )
+
+def _normalize_region_name(value: str) -> str:
+    return " ".join(
+        value.strip().replace("ي", "ی").replace("ك", "ک").replace("\u200c", " ").split()
+    ).casefold()
+
+def _resolve_regions(raw_regions: str) -> tuple[list[str], list[str]]:
+    requested = [part.strip() for part in re.split(r"[،,;|\n]+", raw_regions) if part.strip()]
+    region_lookup = {_normalize_region_name(region): region for region in REGIONS}
+    resolved: list[str] = []
+    invalid: list[str] = []
+    for requested_region in requested:
+        region = region_lookup.get(_normalize_region_name(requested_region))
+        if region is None:
+            invalid.append(requested_region)
+        elif region not in resolved:
+            resolved.append(region)
+    return resolved, invalid
+
 @bot.message_handler(commands=['limit_add'])
 def limit_add(message):
     if not is_main_admin(message.from_user.id):
         bot.reply_to(message, "⛔ شما اجازه استفاده از این دستور را ندارید.")
         return
-    target_user_id = _parse_positive_user_id(message, "limit_add")
-    if target_user_id is None:
+
+    parts = (message.text or "").split(maxsplit=3)
+    if len(parts) < 2:
+        bot.reply_to(message, _limit_add_help())
         return
+    try:
+        target_user_id = int(parts[1])
+        if target_user_id <= 0:
+            raise ValueError
+    except ValueError:
+        bot.reply_to(message, "❌ user_id باید یک عدد صحیح مثبت باشد.\n\n" + _limit_add_help())
+        return
+
     if str(target_user_id) in STATIC_EXCLUDE_IDS:
         bot.reply_to(message, f"ℹ️ کاربر {target_user_id} از قبل استثنای ثابت است.")
         return
-    if add_download_limit_exemption(target_user_id):
-        bot.reply_to(message, f"✅ محدودیت دانلود کاربر {target_user_id} برداشته شد.")
-    else:
-        bot.reply_to(message, f"ℹ️ محدودیت این کاربر قبلاً برداشته شده است.")
+
+    mode = parts[2].casefold() if len(parts) >= 3 else "permanent"
+    if mode in {"1", "permanent", "unlimited", "دائم", "دایمی"}:
+        created = add_download_limit_exemption(target_user_id)
+        if created:
+            notification_sent = send_limit_notification(
+                target_user_id,
+                "🔓 محدودیت دانلود حساب شما به‌صورت دائمی برداشته شد.\n"
+                "از این پس محدودیت روزانه و ماهانه برای شما اعمال نمی‌شود."
+            )
+            warning = "" if notification_sent else "\n⚠️ ارسال پیام به کاربر ممکن نبود."
+            bot.reply_to(
+                message,
+                f"✅ محدودیت کاربر {target_user_id} به‌صورت دائمی برداشته شد.{warning}"
+            )
+        else:
+            bot.reply_to(message, f"ℹ️ کاربر {target_user_id} از قبل بدون محدودیت دائمی است.")
+        return
+
+    if mode in {"2", "daily", "today", "count", "روزانه", "امروز"}:
+        if len(parts) != 4:
+            bot.reply_to(message, "❌ تعداد ایستگاه مشخص نشده است.\n\n" + _limit_add_help())
+            return
+        try:
+            station_limit = int(parts[3])
+            if station_limit <= 0:
+                raise ValueError
+        except ValueError:
+            bot.reply_to(message, "❌ تعداد ایستگاه باید یک عدد صحیح مثبت باشد.")
+            return
+        set_daily_station_limit(target_user_id, station_limit)
+        notification_sent = send_limit_notification(
+            target_user_id,
+            "🔓 سهمیه دانلود امروز شما افزایش یافت.\n\n"
+            f"امروز می‌توانید در مجموع تا {station_limit} ایستگاه دانلود کنید.\n"
+            "پس از مصرف این سهمیه یا پایان امروز، محدودیت عادی دوباره فعال می‌شود."
+        )
+        # If the user had already downloaded this many stations today, close
+        # the override and notify them immediately instead of waiting 30s.
+        process_completed_override_notifications(target_user_id)
+        warning = "" if notification_sent else "\n⚠️ ارسال پیام به کاربر ممکن نبود."
+        bot.reply_to(
+            message,
+            f"✅ کاربر {target_user_id} تا پایان امروز اجازه دانلود {station_limit} ایستگاه را دارد."
+            f"{warning}"
+        )
+        return
+
+    if mode in {"3", "regions", "region", "counties", "county", "شهرستان", "شهرستانها", "شهرستان‌ها"}:
+        if len(parts) != 4:
+            bot.reply_to(message, "❌ نام شهرستان‌ها مشخص نشده است.\n\n" + _limit_add_help())
+            return
+        regions, invalid_regions = _resolve_regions(parts[3])
+        if invalid_regions:
+            invalid_text = "، ".join(invalid_regions)
+            bot.reply_to(
+                message,
+                f"❌ این نام‌ها در فهرست ربات پیدا نشدند:\n{invalid_text}\n\n"
+                "نام‌ها را دقیقاً مطابق دکمه‌های /start وارد کنید و با ویرگول جدا کنید."
+            )
+            return
+        if not regions:
+            bot.reply_to(message, "❌ حداقل یک شهرستان معتبر وارد کنید.")
+            return
+        set_daily_region_override(target_user_id, regions)
+        regions_text = "، ".join(regions)
+        notification_sent = send_limit_notification(
+            target_user_id,
+            "🔓 دسترسی موقت دانلود برای شما فعال شد.\n\n"
+            f"تا پایان امروز می‌توانید از این مناطق دانلود کنید:\n{regions_text}\n\n"
+            "در پایان امروز، محدودیت عادی شما دوباره فعال می‌شود."
+        )
+        warning = "" if notification_sent else "\n⚠️ ارسال پیام به کاربر ممکن نبود."
+        bot.reply_to(
+            message,
+            f"✅ کاربر {target_user_id} تا پایان امروز فقط از این شهرستان‌ها دسترسی دارد:\n"
+            f"{regions_text}{warning}"
+        )
+        return
+
+    bot.reply_to(message, "❌ نوع محدودیت شناخته نشد.\n\n" + _limit_add_help())
 
 @bot.message_handler(commands=['limit_remove'])
 def limit_remove(message):
@@ -684,8 +1068,17 @@ def limit_remove(message):
     if str(target_user_id) in STATIC_EXCLUDE_IDS:
         bot.reply_to(message, "⛔ استثنای ثابت مدیر/سیستم از داخل بات قابل حذف نیست.")
         return
-    if remove_download_limit_exemption(target_user_id):
-        bot.reply_to(message, f"✅ محدودیت دانلود کاربر {target_user_id} دوباره فعال شد.")
+    if remove_download_limit_override(target_user_id):
+        notification_sent = send_limit_notification(
+            target_user_id,
+            "🔒 دسترسی ویژه دانلود شما توسط مدیر پایان یافت.\n"
+            "محدودیت عادی روزانه و ماهانه دوباره فعال شد."
+        )
+        warning = "" if notification_sent else "\n⚠️ ارسال پیام به کاربر ممکن نبود."
+        bot.reply_to(
+            message,
+            f"✅ تنظیم ویژه کاربر {target_user_id} حذف و محدودیت عادی فعال شد.{warning}"
+        )
     else:
         bot.reply_to(message, "ℹ️ این کاربر در فهرست بدون محدودیت نبود.")
 
@@ -762,7 +1155,7 @@ def callback_handler(call):
 
     # ---------- Admin report ----------
     if call.data == "admin_report" and is_main_admin(user_id):
-        today = time.strftime("%Y-%m-%d")
+        today = _today()
         rows = _db_fetchall("SELECT username, station_name FROM downloads WHERE download_date=?", (today,))
         report = "\n".join([f"{u} -> {s}" for u, s in rows]) if rows else "No downloads today."
         bot.send_message(chat_id, f"📊 Today's downloads:\n{report}")
@@ -786,12 +1179,8 @@ def callback_handler(call):
         if not is_main_admin(user_id):
             safe_answer_callback_query(bot, call.id, "دسترسی غیرمجاز", show_alert=True)
             return
-        safe_answer_callback_query(
-            bot,
-            call.id,
-            "برای افزودن ارسال کنید:\n/limit_add user_id",
-            show_alert=True
-        )
+        safe_answer_callback_query(bot, call.id, "راهنمای دستور ارسال شد.")
+        bot.send_message(chat_id, _limit_add_help())
         return
 
     if call.data.startswith("exemption_remove|"):
@@ -803,11 +1192,21 @@ def callback_handler(call):
         except ValueError:
             safe_answer_callback_query(bot, call.id, "شناسه نامعتبر است.", show_alert=True)
             return
-        removed = remove_download_limit_exemption(target_user_id)
+        removed = remove_download_limit_override(target_user_id)
+        notification_sent = True
+        if removed:
+            notification_sent = send_limit_notification(
+                target_user_id,
+                "🔒 دسترسی ویژه دانلود شما توسط مدیر پایان یافت.\n"
+                "محدودیت عادی روزانه و ماهانه دوباره فعال شد."
+            )
+        result_text = "محدودیت کاربر دوباره فعال شد." if removed else "کاربر در فهرست نبود."
+        if removed and not notification_sent:
+            result_text += " ارسال پیام به کاربر ممکن نبود."
         safe_answer_callback_query(
             bot,
             call.id,
-            "محدودیت کاربر دوباره فعال شد." if removed else "کاربر در فهرست نبود.",
+            result_text,
             show_alert=True
         )
         safe_edit_message_text(
@@ -847,18 +1246,7 @@ def callback_handler(call):
 
     # ---------- Check download limit (menu utility) ----------
     if call.data == "check_download_limit":
-        daily_used, daily_limit, monthly_used, monthly_limit = get_download_usage(user_id)
-
-        if is_download_limit_exempt(user_id):
-            text = "✅ No download limits apply to your account."
-        else:
-            daily_left = max(0, daily_limit - daily_used)
-            monthly_left = max(0, monthly_limit - monthly_used)
-            text = (
-                "📊 *Download limit*\n\n"
-                f"• Today: {daily_used}/{daily_limit} (remaining: {daily_left})\n"
-                f"• This month: {monthly_used}/{monthly_limit} (remaining: {monthly_left})"
-            )
+        text = download_limit_status_text(user_id)
 
         # Show as an alert for instant visibility + keep menu intact
         safe_answer_callback_query(bot, call.id, text.replace("*", ""), show_alert=True)
@@ -872,6 +1260,19 @@ def callback_handler(call):
     # ---------- Region selection ----------
     if call.data.startswith("region|"):
         region = call.data.split("|", 1)[1]
+        daily_override = get_active_daily_override(user_id)
+        if (
+            daily_override
+            and daily_override["mode"] == "regions"
+            and region not in daily_override["regions"]
+        ):
+            safe_answer_callback_query(
+                bot,
+                call.id,
+                "❌ این شهرستان در دسترسی موقت امروز شما نیست.",
+                show_alert=True
+            )
+            return
         stations = get_stations_for(region)
         if not stations:
             bot.send_message(chat_id, "⚠️ No stations found for this province.")
@@ -899,37 +1300,39 @@ def callback_handler(call):
         region = parts[1]
         station = parts[-1]
 
-        # ---------- Check download limit ----------
-        if not can_download_daily(user_id) or not can_download_monthly(user_id):
-            safe_answer_callback_query(
-                bot,
-                call.id,
-                "❌ You have already downloaded a station today or reached the 10-stations-per-month limit.",
-                show_alert=True
-            )
+        # Keep the quota check and successful log sequential per user. This
+        # prevents two simultaneous button taps from both consuming the final
+        # available slot.
+        with get_user_download_lock(user_id):
+            access_allowed, denial_message = check_download_access(user_id, region)
+            if not access_allowed:
+                safe_answer_callback_query(
+                    bot,
+                    call.id,
+                    denial_message or "❌ امکان دانلود برای شما وجود ندارد.",
+                    show_alert=True
+                )
+                answered = True
+                return
+
+            min_date, max_date = get_date_range(region, station)
+            if min_date is None or max_date is None:
+                bot.send_message(chat_id, "No data available for this station.")
+                return
+
+            safe_answer_callback_query(bot, call.id)
             answered = True
-            return
+            bot.send_message(chat_id, f"🌡 Selected station: {station}\nData available from {min_date} to {max_date}")
 
-        min_date, max_date = get_date_range(region, station)
-        if min_date is None or max_date is None:
-            bot.send_message(chat_id, "No data available for this station.")
-            return
+            try:
+                bot.send_message(7690029281, f"- 👤 {username} (ID: {user_id})\n  📍{station}\n")
+            except Exception:
+                pass
 
-        # Send a single info message (less API chatter)
-        bot.send_message(chat_id, f"🌡 Selected station: {station}\nData available from {min_date} to {max_date}")
-
-        # Optional: log to admin channel if you want (kept from your original code)
-        try:
-            bot.send_message(7690029281, f"- 👤 {username} (ID: {user_id})\n  📍{station}\n")
-        except Exception:
-            pass
-
-        # Send CSV (in-memory) + PDF (in-memory)
-        _send_station_csv(chat_id, region, station, min_date, max_date)
-        _send_pdf(chat_id)
-
-        # Log download
-        log_download(user_id, username, station)
+            _send_station_csv(chat_id, region, station, min_date, max_date)
+            _send_pdf(chat_id)
+            log_download(user_id, username, station)
+            process_completed_override_notifications(user_id)
 
         # Offer start menu again (single message)
         markup = build_region_menu(user_id)
@@ -951,6 +1354,11 @@ def run_bot():
             time.sleep(5)
 
 if __name__ == "__main__":
+    notification_thread = threading.Thread(
+        target=run_limit_notification_worker,
+        daemon=True
+    )
+    notification_thread.start()
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     while True:
